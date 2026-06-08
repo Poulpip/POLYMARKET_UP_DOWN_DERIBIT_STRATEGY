@@ -168,6 +168,7 @@ def market_to_dict(event):
 
     result = {
         "market_title": title,
+        "market_id": None,
         "barrier": None,
         "current_price": None,
         "hours_remaining": None,
@@ -178,6 +179,7 @@ def market_to_dict(event):
         "token_up": None,
         "token_down": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "expiry_timestamp": end_date_str,
     }
 
     # Calculate time remaining
@@ -216,6 +218,7 @@ def market_to_dict(event):
         return result
 
     market = markets[0]
+    result["market_id"] = market.get("id")
     outcomes = market.get("outcomes", [])
     outcome_prices = market.get("outcomePrices", [])
 

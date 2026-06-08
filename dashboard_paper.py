@@ -105,14 +105,18 @@ if not open_trades.empty:
         'barrier': '${:.2f}'
     }
     
-    # Fill NaN peak prices
-    if 'peak_price' in open_trades.columns:
-        open_trades['peak_price'] = open_trades['peak_price'].fillna(open_trades['entry_polymarket_price'])
-    else:
-        open_trades['peak_price'] = open_trades['entry_polymarket_price']
-        
-    if 'barrier' not in open_trades.columns:
-        open_trades['barrier'] = 0.0
+    # Fill NaN numerical fields to prevent format errors on pre-migration rows
+    for col in ['entry_polymarket_price', 'entry_model_prob', 'size_usdc', 'peak_price', 'barrier']:
+        if col in open_trades.columns:
+            if col == 'peak_price':
+                open_trades['peak_price'] = open_trades['peak_price'].fillna(open_trades['entry_polymarket_price'])
+            else:
+                open_trades[col] = open_trades[col].fillna(0.0)
+        else:
+            if col == 'peak_price':
+                open_trades['peak_price'] = open_trades['entry_polymarket_price']
+            else:
+                open_trades[col] = 0.0
         
     display_open = open_trades[[
         'id', 'market_title', 'direction', 'barrier', 'entry_polymarket_price', 
@@ -134,10 +138,17 @@ if not closed_trades.empty:
         'barrier': '${:.2f}'
     }
     
+    # Fill NaN fields to prevent format errors on pre-migration rows
+    for col in ['entry_polymarket_price', 'entry_model_prob', 'size_usdc', 'exit_price', 'realized_pnl', 'barrier']:
+        if col in closed_trades.columns:
+            closed_trades[col] = closed_trades[col].fillna(0.0)
+        else:
+            closed_trades[col] = 0.0
+            
     if 'exit_reason' not in closed_trades.columns:
         closed_trades['exit_reason'] = 'N/A'
-    if 'barrier' not in closed_trades.columns:
-        closed_trades['barrier'] = 0.0
+    else:
+        closed_trades['exit_reason'] = closed_trades['exit_reason'].fillna('N/A')
         
     display_closed = closed_trades[[
         'id', 'market_title', 'direction', 'barrier', 'entry_polymarket_price', 

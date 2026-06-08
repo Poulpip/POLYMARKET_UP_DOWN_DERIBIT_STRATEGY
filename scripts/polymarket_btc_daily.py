@@ -175,6 +175,8 @@ def market_to_dict(event):
         "minutes": None,
         "prob_up": None,
         "prob_down": None,
+        "token_up": None,
+        "token_down": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -230,16 +232,26 @@ def market_to_dict(event):
         except json.JSONDecodeError:
             outcome_prices = []
 
-    # Extract probabilities
+    clob_tokens = market.get("clobTokenIds", [])
+    if isinstance(clob_tokens, str):
+        try:
+            clob_tokens = json.loads(clob_tokens)
+        except json.JSONDecodeError:
+            clob_tokens = []
+
+    # Extract probabilities and token IDs
     for i, outcome in enumerate(outcomes):
         if i < len(outcome_prices):
             try:
                 price = float(outcome_prices[i])
                 outcome_lower = outcome.lower()
+                token_id = clob_tokens[i] if i < len(clob_tokens) else None
                 if outcome_lower == "up":
                     result["prob_up"] = price
+                    result["token_up"] = token_id
                 elif outcome_lower == "down":
                     result["prob_down"] = price
+                    result["token_down"] = token_id
             except (ValueError, TypeError):
                 pass
 

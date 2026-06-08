@@ -52,3 +52,8 @@ results/
 *.log
 *.lock
 nul
+
+bot_env/
+paper_trades.db
+.env
+logs/

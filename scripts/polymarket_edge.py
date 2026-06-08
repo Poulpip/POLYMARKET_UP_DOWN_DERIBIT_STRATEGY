@@ -123,6 +123,9 @@ def run_polymarket_script(verbose: bool = False, json_path: Path = None):
                 "prob_up": data.get("prob_up"),
                 "prob_down": data.get("prob_down"),
                 "current_price": data.get("current_price"),
+                "market_title": data.get("market_title"),
+                "token_up": data.get("token_up"),
+                "token_down": data.get("token_down"),
                 "raw_output": output
             }
             if verbose:
@@ -350,6 +353,7 @@ def find_opportunities(poly_data: dict, model_data: dict,
         req = required_model_prob(market_p, alpha_up, floor_up)
         opportunities.append({
             "direction": "UP",
+            "token_id": poly_data.get("token_up"),
             "polymarket_prob": market_p,
             "model_prob": model_p,
             "edge": edge_up,
@@ -367,6 +371,7 @@ def find_opportunities(poly_data: dict, model_data: dict,
         req = required_model_prob(market_p, alpha_down, floor_down)
         opportunities.append({
             "direction": "DOWN",
+            "token_id": poly_data.get("token_down"),
             "polymarket_prob": market_p,
             "model_prob": model_p,
             "edge": edge_down,

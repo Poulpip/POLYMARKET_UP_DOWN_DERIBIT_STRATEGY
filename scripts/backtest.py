@@ -371,6 +371,7 @@ def run_backtest(
     floor_up: float | None = None,
     floor_down: float | None = None,
     stop_loss_pct: float = 0.0,
+    allow_concurrent: bool = False,
 ) -> tuple[list[Trade], float]:
     """
     Main backtest loop.
@@ -395,6 +396,7 @@ def run_backtest(
         floor_up: Per-direction floor for UP (overrides floor if set)
         floor_down: Per-direction floor for DOWN (overrides floor if set)
         stop_loss_pct: Stop-loss percentage (0.20 = exit at 20% below entry, 0 = disabled)
+        allow_concurrent: Allow multiple concurrent positions/trades on the same market/barrier
 
     Returns:
         Tuple of (trades list, final capital)
@@ -407,8 +409,8 @@ def run_backtest(
     use_continuous_edge = _alpha_up is not None
     trades: list[Trade] = []
     current_capital = capital
-    position: Optional[Position] = None
-    pending_signal: Optional[PendingSignal] = None
+    active_positions: list[Position] = []
+    pending_signals: list[PendingSignal] = []
 
     # Group rows by reference_price (each barrier = one market)
     markets = group_markets(df)
@@ -418,98 +420,106 @@ def run_backtest(
 
     for barrier in sorted_barriers:
         market_df = markets[barrier]
-        # Reset pending signal when market changes
-        pending_signal = None
+        # Reset pending signals and active positions when market changes
+        pending_signals = []
+        active_positions = []
         last_ob_checked_ts = ""
 
         for i, row in enumerate(market_df):
             is_last = i == len(market_df) - 1
             row_ts = datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
 
-            # Check if pending signal is ready to execute
-            if pending_signal is not None and position is None:
+            # Check if any pending signals are ready to execute
+            matured_signals = []
+            remaining_signals = []
+            for pending_signal in pending_signals:
                 signal_ts = datetime.fromisoformat(pending_signal.signal_timestamp.replace("Z", "+00:00"))
                 elapsed_minutes = (row_ts - signal_ts).total_seconds() / 60
-
                 if elapsed_minutes >= latency_minutes and row["time_remaining_hours"] >= min_time_remaining_hours:
-                    # Execute the pending entry at current price
-                    entry_price, entry_source = get_entry_price(pending_signal.direction, row, orderbook, barrier)
-                    pos, cost = try_open_position(
-                        pending_signal.direction, entry_price, entry_source,
-                        barrier, row["timestamp"], current_capital, order_size_pct, friction,
-                        model_prob=pending_signal.model_prob,
-                        market_prob=pending_signal.market_prob,
-                        edge=pending_signal.edge,
-                        spot_at_entry=pending_signal.spot_at_entry,
-                        time_remaining_hours=pending_signal.time_remaining_hours,
-                    )
-                    if pos:
-                        position = pos
-                        current_capital -= cost
-                        last_ob_checked_ts = row["timestamp"]
-                    pending_signal = None
+                    matured_signals.append(pending_signal)
+                else:
+                    remaining_signals.append(pending_signal)
+            pending_signals = remaining_signals
 
-            # Entry logic (if no position and no pending signal)
-            if position is None and pending_signal is None and row["time_remaining_hours"] >= min_time_remaining_hours:
-                # Use averaged probabilities if available, fall back to model_prob
-                avg_up = row.get("avg_prob_up", row["model_prob_up"])
-                avg_down = row.get("avg_prob_down", row["model_prob_down"])
+            for pending_signal in matured_signals:
+                entry_price, entry_source = get_entry_price(pending_signal.direction, row, orderbook, barrier)
+                pos, cost = try_open_position(
+                    pending_signal.direction, entry_price, entry_source,
+                    barrier, row["timestamp"], current_capital, order_size_pct, friction,
+                    model_prob=pending_signal.model_prob,
+                    market_prob=pending_signal.market_prob,
+                    edge=pending_signal.edge,
+                    spot_at_entry=pending_signal.spot_at_entry,
+                    time_remaining_hours=pending_signal.time_remaining_hours,
+                )
+                if pos:
+                    active_positions.append(pos)
+                    current_capital -= cost
+                    last_ob_checked_ts = row["timestamp"]
 
-                # Recompute edge from averaged probabilities (when B-L data exists)
-                if "avg_prob_up" in row:
-                    if row["poly_prob_up"] > 0:
-                        row["edge_up"] = avg_up / row["poly_prob_up"]
-                    if row["poly_prob_down"] > 0:
-                        row["edge_down"] = avg_down / row["poly_prob_down"]
+            # Entry logic
+            if allow_concurrent or (not active_positions and not pending_signals):
+                if row["time_remaining_hours"] >= min_time_remaining_hours:
+                    # Use averaged probabilities if available, fall back to model_prob
+                    avg_up = row.get("avg_prob_up", row["model_prob_up"])
+                    avg_down = row.get("avg_prob_down", row["model_prob_down"])
 
-                for direction, edge_field, edge_threshold, avg_val, poly_field, dir_alpha, dir_floor in [
-                    (Direction.UP, "edge_up", edge_up, avg_up, "poly_prob_up", _alpha_up, _floor_up),
-                    (Direction.DOWN, "edge_down", edge_down, avg_down, "poly_prob_down", _alpha_down, _floor_down),
-                ]:
-                    if use_continuous_edge:
-                        model_p = avg_val / 100
-                        market_p = row[poly_field] / 100
-                        entry_signal = _has_edge(model_p, market_p, dir_alpha, dir_floor)
-                    else:
-                        entry_signal = row[edge_field] >= edge_threshold and avg_val / 100 >= min_model_prob
-                    if entry_signal:
-                        # Capture entry context from signal row
-                        _model_p = avg_val / 100
-                        _market_p = row[poly_field] / 100
-                        _edge = _model_p / _market_p if _market_p > 0 else 0.0
-                        _spot = row["spot_price"]
-                        _time_rem = row["time_remaining_hours"]
+                    # Recompute edge from averaged probabilities (when B-L data exists)
+                    if "avg_prob_up" in row:
+                        if row["poly_prob_up"] > 0:
+                            row["edge_up"] = avg_up / row["poly_prob_up"]
+                        if row["poly_prob_down"] > 0:
+                            row["edge_down"] = avg_down / row["poly_prob_down"]
 
-                        if latency_minutes > 0:
-                            pending_signal = PendingSignal(
-                                direction=direction,
-                                signal_timestamp=row["timestamp"],
-                                reference_price=barrier,
-                                model_prob=_model_p,
-                                market_prob=_market_p,
-                                edge=_edge,
-                                spot_at_entry=_spot,
-                                time_remaining_hours=_time_rem,
-                            )
+                    for direction, edge_field, edge_threshold, avg_val, poly_field, dir_alpha, dir_floor in [
+                        (Direction.UP, "edge_up", edge_up, avg_up, "poly_prob_up", _alpha_up, _floor_up),
+                        (Direction.DOWN, "edge_down", edge_down, avg_down, "poly_prob_down", _alpha_down, _floor_down),
+                    ]:
+                        if use_continuous_edge:
+                            model_p = avg_val / 100
+                            market_p = row[poly_field] / 100
+                            entry_signal = _has_edge(model_p, market_p, dir_alpha, dir_floor)
                         else:
-                            entry_price, entry_source = get_entry_price(direction, row, orderbook, barrier)
-                            pos, cost = try_open_position(
-                                direction, entry_price, entry_source,
-                                barrier, row["timestamp"], current_capital, order_size_pct, friction,
-                                model_prob=_model_p,
-                                market_prob=_market_p,
-                                edge=_edge,
-                                spot_at_entry=_spot,
-                                time_remaining_hours=_time_rem,
-                            )
-                            if pos:
-                                position = pos
-                                current_capital -= cost
-                                last_ob_checked_ts = row["timestamp"]
-                        break  # Only enter one direction
+                            entry_signal = row[edge_field] >= edge_threshold and avg_val / 100 >= min_model_prob
+                        if entry_signal:
+                            # Capture entry context from signal row
+                            _model_p = avg_val / 100
+                            _market_p = row[poly_field] / 100
+                            _edge = _model_p / _market_p if _market_p > 0 else 0.0
+                            _spot = row["spot_price"]
+                            _time_rem = row["time_remaining_hours"]
 
-            # Exit logic (if has position)
-            elif position is not None:
+                            if latency_minutes > 0:
+                                pending_signals.append(PendingSignal(
+                                    direction=direction,
+                                    signal_timestamp=row["timestamp"],
+                                    reference_price=barrier,
+                                    model_prob=_model_p,
+                                    market_prob=_market_p,
+                                    edge=_edge,
+                                    spot_at_entry=_spot,
+                                    time_remaining_hours=_time_rem,
+                                ))
+                            else:
+                                entry_price, entry_source = get_entry_price(direction, row, orderbook, barrier)
+                                pos, cost = try_open_position(
+                                    direction, entry_price, entry_source,
+                                    barrier, row["timestamp"], current_capital, order_size_pct, friction,
+                                    model_prob=_model_p,
+                                    market_prob=_market_p,
+                                    edge=_edge,
+                                    spot_at_entry=_spot,
+                                    time_remaining_hours=_time_rem,
+                                )
+                                if pos:
+                                    active_positions.append(pos)
+                                    current_capital -= cost
+                                    last_ob_checked_ts = row["timestamp"]
+                            break  # Only enter one direction
+
+            # Exit logic
+            remaining_positions = []
+            for position in active_positions:
                 tp_price = position.entry_price * (1 + tp_pct)
                 activation_price = position.entry_price * (1 + trail_activation)
                 sl_price = position.entry_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else 0.0
@@ -521,7 +531,6 @@ def run_backtest(
                 final_spot: Optional[float] = None
 
                 # --- Intra-bar orderbook scanning ---
-                # Check OB snapshots between last checked timestamp and current row
                 ob_rows = get_orderbook_rows_in_range(
                     orderbook, last_ob_checked_ts, row["timestamp"],
                     position.direction.value, reference_price=barrier,
@@ -530,10 +539,8 @@ def run_backtest(
                     ob_bid = ob_row["best_bid"]
                     ob_ask = ob_row["best_ask"]
                     ob_mid = (ob_bid + ob_ask) / 2 if ob_ask is not None else ob_bid
-                    # Update peak price from intra-bar data
                     position.peak_price = max(position.peak_price, ob_bid)
 
-                    # TP check: limit order fills at tp_price
                     if ob_bid >= tp_price:
                         exit_price = tp_price
                         exit_source = PRICE_SOURCE_ORDERBOOK
@@ -542,7 +549,6 @@ def run_backtest(
                         exit_triggered = True
                         break
 
-                    # Trail check: GTC sell fills at trail_level
                     if position.peak_price >= activation_price:
                         trail_level = position.peak_price - position.entry_price * trail_distance
                         if ob_bid <= trail_level:
@@ -553,7 +559,6 @@ def run_backtest(
                             exit_triggered = True
                             break
 
-                    # Stop-loss check: trigger on mid, fill at bid
                     if sl_price > 0 and ob_mid <= sl_price:
                         exit_price = ob_bid
                         exit_source = PRICE_SOURCE_ORDERBOOK
@@ -562,9 +567,8 @@ def run_backtest(
                         exit_triggered = True
                         break
 
-                # --- Probability-row checks (if no intra-bar exit) ---
+                # --- Probability-row checks ---
                 if not exit_triggered:
-                    # Get current price from orderbook bid or fallback to poly_prob
                     bid, ask = get_orderbook_prices(orderbook, row["timestamp"], position.direction.value, reference_price=barrier)
                     if bid is not None:
                         current_price = bid
@@ -574,16 +578,13 @@ def run_backtest(
                     else:
                         current_price = row["poly_prob_down"] / 100
 
-                    # Update peak price tracking
                     position.peak_price = max(position.peak_price, current_price)
 
-                    # 1. TP check
                     if current_price >= tp_price:
-                        exit_price = tp_price  # Limit order fills at TP target
+                        exit_price = tp_price
                         result = TradeResult.TP_FILLED
                         exit_triggered = True
 
-                    # 2. Trailing stop check
                     if not exit_triggered:
                         if position.peak_price >= activation_price:
                             trail_level = position.peak_price - position.entry_price * trail_distance
@@ -592,14 +593,12 @@ def run_backtest(
                                 result = TradeResult.TRAILING_STOP
                                 exit_triggered = True
 
-                    # 3. Stop-loss check (trigger on mid, fill at bid)
                     mid_price = (bid + ask) / 2 if bid is not None and ask is not None else current_price
                     if not exit_triggered and sl_price > 0 and mid_price <= sl_price:
                         exit_price = current_price
                         result = TradeResult.STOP_LOSS
                         exit_triggered = True
 
-                    # 4. Expiry check (last row or time <= 0)
                     if not exit_triggered and (is_last or row["time_remaining_hours"] <= 0):
                         final_spot = row["spot_price"]
                         if position.direction == Direction.UP:
@@ -608,7 +607,7 @@ def run_backtest(
                             won = final_spot < barrier
 
                         exit_price = 1.0 if won else 0.0
-                        exit_source = PRICE_SOURCE_FALLBACK  # Expiry is always deterministic
+                        exit_source = PRICE_SOURCE_FALLBACK
                         result = TradeResult.WIN_EXPIRY if won else TradeResult.LOSS_EXPIRY
                         exit_triggered = True
 
@@ -616,7 +615,6 @@ def run_backtest(
                     if result in (TradeResult.TP_FILLED, TradeResult.TRAILING_STOP, TradeResult.STOP_LOSS):
                         proceeds = position.shares * exit_price * (1 - friction)
                     else:
-                        # Expiry settlement (WIN/LOSS) has no trading friction
                         proceeds = position.shares * exit_price
                     pnl = proceeds - position.cost_basis
                     pnl_pct = (pnl / position.cost_basis) * 100 if position.cost_basis > 0 else 0.0
@@ -645,9 +643,11 @@ def run_backtest(
                     )
                     trades.append(trade)
                     current_capital += proceeds
-                    position = None
+                else:
+                    remaining_positions.append(position)
+            active_positions = remaining_positions
 
-                last_ob_checked_ts = row["timestamp"]
+            last_ob_checked_ts = row["timestamp"]
 
     return trades, current_capital
 
@@ -753,6 +753,7 @@ def print_summary(
     floor_up: float | None = None,
     floor_down: float | None = None,
     stop_loss_pct: float = 0.0,
+    allow_concurrent: bool = False,
 ) -> None:
     """Print summary statistics."""
     print("\n" + "=" * 80)
@@ -796,6 +797,7 @@ def print_summary(
     print(f"  Friction:    {friction * 100:.1f}% per side")
     print(f"  Latency:     {latency_minutes:.0f} min")
     print(f"  Capital:     ${initial_capital:.2f}")
+    print(f"  Concurrent:  {allow_concurrent}")
 
     if not trades:
         print("\n  No trades executed.")
@@ -1039,6 +1041,11 @@ def main():
         default=0.0,
         help="Stop-loss percentage below entry (0.20 = exit at 20%% loss, 0 = disabled)",
     )
+    parser.add_argument(
+        "--allow-concurrent",
+        action="store_true",
+        help="Allow multiple concurrent positions/trades on the same market/barrier",
+    )
 
     args = parser.parse_args()
 
@@ -1107,6 +1114,7 @@ def main():
         floor_up=args.floor_up,
         floor_down=args.floor_down,
         stop_loss_pct=args.stop_loss,
+        allow_concurrent=args.allow_concurrent,
     )
 
     # Get data statistics
@@ -1135,6 +1143,7 @@ def main():
         floor_up=args.floor_up,
         floor_down=args.floor_down,
         stop_loss_pct=args.stop_loss,
+        allow_concurrent=args.allow_concurrent,
     )
 
     # Save trades if output specified

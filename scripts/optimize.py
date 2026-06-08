@@ -120,14 +120,16 @@ _worker_df = None
 _worker_orderbook = None
 _worker_duration_days = 0.0
 _worker_order_size_pct = 0.05
+_worker_allow_concurrent = False
 
 
-def _worker_init(df, orderbook, order_size_pct=0.05):
+def _worker_init(df, orderbook, order_size_pct=0.05, allow_concurrent=False):
     """Pool initializer: store data in worker globals (called once per worker process)."""
-    global _worker_df, _worker_orderbook, _worker_duration_days, _worker_order_size_pct
+    global _worker_df, _worker_orderbook, _worker_duration_days, _worker_order_size_pct, _worker_allow_concurrent
     _worker_df = df
     _worker_orderbook = orderbook
     _worker_order_size_pct = order_size_pct
+    _worker_allow_concurrent = allow_concurrent
     stats = get_data_stats(df)
     _worker_duration_days = stats["duration_hours"] / 24 if stats.get("duration_hours") else 0.0
 
@@ -168,6 +170,7 @@ def _run_single_combo(args):
         floor_up=floor_up_val,
         floor_down=floor_down_val,
         stop_loss_pct=stop_loss_pct,
+        allow_concurrent=_worker_allow_concurrent,
     )
 
     total_pnl = final_capital - capital
@@ -238,6 +241,7 @@ def bootstrap_pnl(
     min_time_remaining_hours: float = 2.0,
     min_model_prob: float = 0.0,
     order_size_pct: float = 0.05,
+    allow_concurrent: bool = False,
 ) -> dict:
     """
     Bootstrap confidence intervals using block bootstrap on per-market P&L.
@@ -278,6 +282,7 @@ def bootstrap_pnl(
             floor_up=params.get("floor_up"),
             floor_down=params.get("floor_down"),
             stop_loss_pct=params.get("stop_loss_pct", 0.0),
+            allow_concurrent=allow_concurrent,
         )
         per_market_pnls.append(final_cap - capital)
 
@@ -310,6 +315,7 @@ def per_market_analysis(
     min_time_remaining_hours: float = 2.0,
     min_model_prob: float = 0.0,
     order_size_pct: float = 0.05,
+    allow_concurrent: bool = False,
 ) -> dict:
     """
     Per-market P&L analysis.
@@ -350,6 +356,7 @@ def per_market_analysis(
             floor_up=params.get("floor_up"),
             floor_down=params.get("floor_down"),
             stop_loss_pct=params.get("stop_loss_pct", 0.0),
+            allow_concurrent=allow_concurrent,
         )
         cv_pnls.append(final_capital - capital)
 
@@ -387,6 +394,7 @@ def run_optimization(
     floor_down_values: list[float] | None = None,
     stop_loss_values: list[float] | None = None,
     order_size_pct: float = 0.05,
+    allow_concurrent: bool = False,
 ) -> list[dict]:
     """
     Run optimization loop to find best thresholds.
@@ -507,10 +515,11 @@ def run_optimization(
 
     if workers <= 1:
         # Sequential: set module globals directly, no multiprocessing overhead
-        global _worker_df, _worker_orderbook, _worker_order_size_pct, _worker_duration_days
+        global _worker_df, _worker_orderbook, _worker_order_size_pct, _worker_duration_days, _worker_allow_concurrent
         _worker_df = df
         _worker_orderbook = orderbook
         _worker_order_size_pct = order_size_pct
+        _worker_allow_concurrent = allow_concurrent
         stats = get_data_stats(df)
         _worker_duration_days = stats["duration_hours"] / 24 if stats.get("duration_hours") else 0.0
         combo_num = 0
@@ -524,7 +533,7 @@ def run_optimization(
         chunksize = max(1, total_combos // (workers * 4))
         combo_num = 0
         with multiprocessing.Pool(
-            workers, initializer=_worker_init, initargs=(df, orderbook, order_size_pct)
+            workers, initializer=_worker_init, initargs=(df, orderbook, order_size_pct, allow_concurrent)
         ) as pool:
             for result in pool.imap_unordered(_run_single_combo, all_args, chunksize=chunksize):
                 results.append(result)
@@ -565,6 +574,7 @@ def run_optimization(
                     min_time_remaining_hours=min_time_remaining_hours,
                     min_model_prob=result.get("min_model_prob", 0),
                     order_size_pct=order_size_pct,
+                    allow_concurrent=allow_concurrent,
                 )
                 result["bootstrap_mean"] = bootstrap["mean"]
                 result["bootstrap_std"] = bootstrap["std"]
@@ -581,6 +591,7 @@ def run_optimization(
                     min_time_remaining_hours=min_time_remaining_hours,
                     min_model_prob=result.get("min_model_prob", 0),
                     order_size_pct=order_size_pct,
+                    allow_concurrent=allow_concurrent,
                 )
                 result["cv_mean_pnl"] = cv["mean"]
                 result["cv_std_pnl"] = cv["std"]
@@ -660,6 +671,7 @@ def print_stability_analysis(
     orderbook: dict | None = None,
     min_time_remaining_hours: float = 2.0,
     order_size_pct: float = 0.05,
+    allow_concurrent: bool = False,
 ) -> None:
     """Print parameter stability analysis and backtest the suggested robust parameters."""
     stability = analyze_parameter_stability(results, min_trades)
@@ -769,6 +781,7 @@ def print_stability_analysis(
             trail_distance=robust_trail_dist,
             min_time_remaining_hours=min_time_remaining_hours,
             stop_loss_pct=robust_sl,
+            allow_concurrent=allow_concurrent,
         )
         if use_continuous:
             bt_kwargs["alpha_up"] = robust_alpha_up
@@ -1598,6 +1611,11 @@ def main():
         default=sl_default,
         help="Stop-loss %% values to grid search (0.20 = 20%% below entry, 0 = disabled)",
     )
+    parser.add_argument(
+        "--allow-concurrent",
+        action="store_true",
+        help="Allow multiple concurrent positions/trades on the same market/barrier",
+    )
 
     args = parser.parse_args()
 
@@ -1691,6 +1709,7 @@ def main():
         floor_down_values=floor_down_values,
         stop_loss_values=stop_loss_values,
         order_size_pct=args.order_size,
+        allow_concurrent=args.allow_concurrent,
     )
 
     # Print results
@@ -1720,6 +1739,7 @@ def main():
         orderbook=orderbook,
         min_time_remaining_hours=args.min_time_remaining,
         order_size_pct=args.order_size,
+        allow_concurrent=args.allow_concurrent,
     )
 
     # Plot PnL curves for best by Sharpe and best by P&L
@@ -1756,6 +1776,7 @@ def main():
                 floor_up=best.get("floor_up"),
                 floor_down=best.get("floor_down"),
                 stop_loss_pct=best.get("stop_loss_pct", 0.0),
+                allow_concurrent=args.allow_concurrent,
             )
             plot_best_pnl_curve(
                 best_trades,

@@ -83,15 +83,14 @@ def on_ws_price_update(token_id, bid, ask):
                 logger.info(f"⚡ INSTANT EXIT via WebSocket ({exit_reason}) for {trade['direction']}!")
                 logger.info(f"Entry: ${entry_price:.3f} | Exit: ${exit_price:.3f} | Bid: ${bid:.3f}")
                 
-                # Execute Sell
+                # Execute Sell Live
                 size_shares = trade['size_usdc'] / entry_price
                 result = live_trader.execute_market_trade(token_id, "SELL", size_shares, exit_price)
                 
-                if result['status'] in ('filled', 'paper'):
-                    exec_price = result.get('exec_price', exit_price)
-                    realized_pnl = (size_shares * exec_price) - trade['size_usdc']
-                    close_paper_trade(trade['id'], exec_price, realized_pnl, result.get('tx_hash'), exit_reason)
-                    logger.info(f"✅ Position Closed. Realized PnL: ${realized_pnl:.2f}")
+                # Close Paper Trade perfectly
+                realized_pnl = (size_shares * exit_price) - trade['size_usdc']
+                close_paper_trade(trade['id'], exit_price, realized_pnl, result.get('tx_hash'), exit_reason)
+                logger.info(f"✅ Paper Position Closed. Realized PnL: ${realized_pnl:.2f}")
 
 def check_open_trades_exits_polling(poly_data, current_market_title):
     """Fallback exits check via REST polling during main cycle."""
@@ -141,11 +140,9 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                     size_shares = trade['size_usdc'] / entry_price
                     result = live_trader.execute_market_trade(trade['token_id'], "SELL", size_shares, exit_price)
                     
-                    if result['status'] in ('filled', 'paper'):
-                        exec_price = result.get('exec_price', exit_price)
-                        realized_pnl = (size_shares * exec_price) - trade['size_usdc']
-                        close_paper_trade(trade['id'], exec_price, realized_pnl, result.get('tx_hash'), exit_reason)
-                        logger.info(f"✅ Position Closed. Realized PnL: ${realized_pnl:.2f}")
+                    realized_pnl = (size_shares * exit_price) - trade['size_usdc']
+                    close_paper_trade(trade['id'], exit_price, realized_pnl, result.get('tx_hash'), exit_reason)
+                    logger.info(f"✅ Paper Position Closed. Realized PnL: ${realized_pnl:.2f}")
 
 def resolve_expired_trades():
     """Query Binance for BTC price at expiry of any open trades that have expired and resolve them."""
@@ -255,21 +252,21 @@ def run_loop():
                         
                         trade_res = live_trader.execute_market_trade(token_id, "BUY", TRADE_SIZE_USDC, market_entry)
                         
-                        if trade_res['status'] in ('filled', 'paper'):
-                            record_paper_trade(
-                                market_title=market_title,
-                                direction=direction,
-                                entry_price=trade_res.get('exec_price', market_entry),
-                                model_prob=model_prob,
-                                size_usdc=TRADE_SIZE_USDC,
-                                token_id=token_id,
-                                tx_hash=trade_res.get('tx_hash'),
-                                peak_price=trade_res.get('exec_price', market_entry),
-                                barrier=poly_data.get('barrier'),
-                                expiry_timestamp=poly_data.get('expiry_timestamp')
-                            )
-                            # Instantly add to WS subscription to track price
-                            update_ws_subscriptions()
+                        # Always record paper trade to track theoretical edge
+                        record_paper_trade(
+                            market_title=market_title,
+                            direction=direction,
+                            entry_price=market_entry,
+                            model_prob=model_prob,
+                            size_usdc=TRADE_SIZE_USDC,
+                            token_id=token_id,
+                            tx_hash=trade_res.get('tx_hash'),
+                            peak_price=market_entry,
+                            barrier=poly_data.get('barrier'),
+                            expiry_timestamp=poly_data.get('expiry_timestamp')
+                        )
+                        # Instantly add to WS subscription to track price
+                        update_ws_subscriptions()
                     elif not token_id:
                         logger.warning(f"Edge exists but no token_id found for {direction}.")
                     else:

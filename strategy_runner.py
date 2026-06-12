@@ -17,7 +17,7 @@ except ImportError as e:
     logging.error(f"Failed to import strategy logic: {e}")
     raise
 
-logger = logging.getLogger(__name__)
+from config import logger
 
 def evaluate_market_edge(alpha_up=1.5, alpha_down=1.5, floor_up=0.35, floor_down=0.35):
     """

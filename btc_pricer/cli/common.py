@@ -613,6 +613,14 @@ def _calibrate_both_parallel(
         if surface is not None:
             expiry_surfaces.append(surface)
 
+    if target_expiry:
+        # If a specific expiry was requested, only calibrate that one
+        expiry_surfaces = [s for s in expiry_surfaces if s[0] == target_expiry]
+    else:
+        # Otherwise, limit parallel calibration to the 3 closest/best expiries
+        # to prevent extremely long 15+ minute calibrations
+        expiry_surfaces = expiry_surfaces[:3]
+
     if not expiry_surfaces:
         raise DeribitAPIError("Could not calibrate Heston to any expiry")
 

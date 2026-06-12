@@ -53,6 +53,35 @@ class LiveTrader:
             logger.error(f"❌ Failed to initialize ClobClient: {e}")
             self.client = None
 
+    def get_live_price(self, token_id: str, side: str) -> float:
+        """Fetches the exact live orderbook price (best ask for BUY, best bid for SELL).
+        
+        The CLOB SDK's get_order_book() returns a plain dict like:
+        {'asks': [{'price': '0.82', 'size': '100'}], 'bids': [{'price': '0.80', 'size': '50'}]}
+        """
+        if not self.client:
+            return None
+        try:
+            ob = self.client.get_order_book(token_id)
+            
+            if side.upper() == 'BUY':
+                asks = ob.get('asks', []) if isinstance(ob, dict) else getattr(ob, 'asks', [])
+                if not asks:
+                    return None
+                first = asks[0]
+                price_val = first.get('price') if isinstance(first, dict) else getattr(first, 'price', None)
+                return float(price_val) if price_val else None
+            else:
+                bids = ob.get('bids', []) if isinstance(ob, dict) else getattr(ob, 'bids', [])
+                if not bids:
+                    return None
+                first = bids[0]
+                price_val = first.get('price') if isinstance(first, dict) else getattr(first, 'price', None)
+                return float(price_val) if price_val else None
+        except Exception as e:
+            logger.error(f"Failed to fetch live orderbook: {e}")
+            return None
+
     def execute_market_trade(self, token_id: str, side: str, size: float, price: float, min_order_size: float = 0.1):
         if not Config.LIVE_MODE or self.client is None:
             logger.info(f"[PAPER_TRADE] -> execute_market_trade: {side} {size} units of {token_id} at {price}")
@@ -63,7 +92,13 @@ class LiveTrader:
             order_side = BUY if side.upper() == 'BUY' else SELL
             
             is_limit_order = False
-            safe_price = round(min(0.99, max(0.01, float(price))), 4)
+            
+            # Add 5% slippage tolerance to ensure market orders (FAK) match the order book
+            slippage = 0.05
+            if side.upper() == 'BUY':
+                safe_price = round(min(0.99, float(price) * (1 + slippage)), 4)
+            else:
+                safe_price = round(max(0.01, float(price) * (1 - slippage)), 4)
             
             if side.upper() == 'BUY':
                 # The old bot treated size as USDC amount for BUY orders

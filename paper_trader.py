@@ -5,27 +5,20 @@ import threading
 from datetime import datetime, timezone
 
 # EARLY LOGGER INITIALIZATION (per user rules)
-from config import Config
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("paper_trader")
+from config import Config, logger
 
 # Local imports
 from strategy_runner import evaluate_market_edge
 from db_manager import init_db, record_paper_trade, get_open_trades, close_paper_trade, update_peak_price
 from live_client import LiveTrader
 from market_ws import MarketWebsocket
+from scripts.polymarket_edge import _has_edge
 
 # Trade parameter constants (robust backtest configuration)
 TAKE_PROFIT_PCT = 0.30
 TRAIL_ACTIVATION_PCT = 0.20
 TRAIL_DISTANCE_PCT = 0.15
-ALLOW_CONCURRENT = True
+ALLOW_CONCURRENT = False
 
 ALPHA_UP = 2.0
 ALPHA_DOWN = 1.0
@@ -33,6 +26,7 @@ FLOOR_UP = 0.65
 FLOOR_DOWN = 0.55
 
 TRADE_SIZE_USDC = getattr(Config, 'MAX_USDC_PER_TRADE', 100.0)
+MAX_ENTRY_PRICE = 0.99  # Never buy above 99¢ — no meaningful upside after fees
 
 live_trader = LiveTrader()
 market_ws = MarketWebsocket()
@@ -220,10 +214,12 @@ def run_loop():
             # Resolve any expired open trades first
             resolve_expired_trades()
             
+            loop_start = time.time()
             result = evaluate_market_edge(
                 alpha_up=ALPHA_UP, alpha_down=ALPHA_DOWN,
                 floor_up=FLOOR_UP, floor_down=FLOOR_DOWN
             )
+            eval_latency = time.time() - loop_start
             
             if result:
                 market_title = result['market_title']
@@ -242,35 +238,64 @@ def run_loop():
                     model_prob = opp['model_prob']
                     token_id = opp.get('token_id')
                     
-                    already_open = any(
-                        t['market_title'] == market_title and t['direction'] == direction 
+                    opposite_open = any(
+                        t['market_title'] == market_title and t['direction'] != direction 
                         for t in open_trades
                     )
                     
-                    if (ALLOW_CONCURRENT or not already_open) and token_id:
+                    if (ALLOW_CONCURRENT or not opposite_open) and token_id:
+                        logger.info(f"[PREDICTION] Market: {market_title} | Side: {direction} | Polymarket Price: ${market_entry:.4f} | Model Prob: {model_prob:.4f} | Eval Latency: {eval_latency:.2f}s")
+                        if market_entry > MAX_ENTRY_PRICE:
+                            logger.info(f"Edge exists for {direction} but entry price ${market_entry:.4f} > cap ${MAX_ENTRY_PRICE}. Skipping.")
+                            continue
+                        
+                        # NEW: Fetch live CLOB price to prevent buying on stale edge
+                        if Config.LIVE_MODE:
+                            live_ask = live_trader.get_live_price(token_id, "BUY")
+                            if live_ask:
+                                # Re-verify edge with live price
+                                is_edge = False
+                                if direction == 'UP':
+                                    is_edge = _has_edge(model_prob, live_ask, ALPHA_UP, FLOOR_UP)
+                                else:
+                                    is_edge = _has_edge(model_prob, live_ask, ALPHA_DOWN, FLOOR_DOWN)
+                                
+                                if not is_edge:
+                                    logger.info(f"Live orderbook price ${live_ask:.4f} eliminated edge (Model: {model_prob:.4f}). Skipping.")
+                                    continue
+                                
+                                logger.info(f"Edge verified at live price! Gamma: ${market_entry:.4f} -> Live: ${live_ask:.4f}")
+                                market_entry = live_ask
+                            else:
+                                logger.warning("Could not fetch live price from orderbook. Aborting trade to avoid stale FAK.")
+                                continue
+
                         logger.info(f"Found valid edge! Buying {direction} for ${market_entry:.3f}")
                         
                         trade_res = live_trader.execute_market_trade(token_id, "BUY", TRADE_SIZE_USDC, market_entry)
                         
-                        # Always record paper trade to track theoretical edge
-                        record_paper_trade(
-                            market_title=market_title,
-                            direction=direction,
-                            entry_price=market_entry,
-                            model_prob=model_prob,
-                            size_usdc=TRADE_SIZE_USDC,
-                            token_id=token_id,
-                            tx_hash=trade_res.get('tx_hash'),
-                            peak_price=market_entry,
-                            barrier=poly_data.get('barrier'),
-                            expiry_timestamp=poly_data.get('expiry_timestamp')
-                        )
-                        # Instantly add to WS subscription to track price
-                        update_ws_subscriptions()
+                        if Config.LIVE_MODE and trade_res.get('status') == 'failed':
+                            logger.error(f"Live trade failed! Not recording to database. Error: {trade_res.get('error')}")
+                        else:
+                            # Record trade to database
+                            record_paper_trade(
+                                market_title=market_title,
+                                direction=direction,
+                                entry_price=market_entry,
+                                model_prob=model_prob,
+                                size_usdc=TRADE_SIZE_USDC,
+                                token_id=token_id,
+                                tx_hash=trade_res.get('tx_hash'),
+                                peak_price=market_entry,
+                                barrier=poly_data.get('barrier'),
+                                expiry_timestamp=poly_data.get('expiry_timestamp')
+                            )
+                            # Instantly add to WS subscription to track price
+                            update_ws_subscriptions()
                     elif not token_id:
                         logger.warning(f"Edge exists but no token_id found for {direction}.")
                     else:
-                        logger.info(f"Edge exists for {direction}, but we already have an open position (concurrent={ALLOW_CONCURRENT}).")
+                        logger.info(f"Edge exists for {direction}, but we already have an OPPOSITE open position (concurrent={ALLOW_CONCURRENT}).")
             else:
                 logger.info("No active market data retrieved. Waiting for next cycle.")
                 

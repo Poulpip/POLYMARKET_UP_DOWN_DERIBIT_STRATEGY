@@ -10,8 +10,8 @@ class Config:
     LIVE_MODE = os.environ.get('LIVE_MODE', 'False').lower() in ['true', '1', 't', 'y', 'yes']
 
     # Trading & Execution Keys
-    TRADING_PRIVATE_KEY = os.environ.get('MY_WALLET_PRIVATE_KEY') or os.environ.get('POLY_PRIVATE_KEY')
-    WALLET_ADDRESS = os.environ.get('MY_WALLET')
+    TRADING_PRIVATE_KEY = os.environ.get('WALLET_PRIVATE_KEY') or os.environ.get('POLY_PRIVATE_KEY')
+    WALLET_ADDRESS = os.environ.get('WALLET_ADDRESS')
     FUNDER_ADDRESS = os.environ.get('FUNDER_ADDRESS')
 
     # Endpoints

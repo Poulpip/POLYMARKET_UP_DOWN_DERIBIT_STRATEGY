@@ -78,6 +78,24 @@ with col1:
     open_count = len(open_trades) if not open_trades.empty else 0
     st.metric("Active Open Positions", f"{open_count}")
 
+st.sidebar.markdown("---")
+auto_refresh = st.sidebar.checkbox("Auto-Refresh (10s)", value=True)
+
+# Initialize live trader to fetch current prices
+@st.cache_resource
+def get_live_trader():
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from live_client import LiveTrader
+    return LiveTrader()
+
+try:
+    live_trader = get_live_trader()
+except Exception as e:
+    st.error(f"Failed to load LiveTrader: {e}")
+    live_trader = None
+
 with col2:
     if not closed_trades.empty:
         total_pnl = closed_trades['realized_pnl'].sum()
@@ -102,7 +120,9 @@ if not open_trades.empty:
         'entry_model_prob': '{:.2f}',
         'size_usdc': '${:.2f}',
         'peak_price': '${:.2f}',
-        'barrier': '${:.2f}'
+        'barrier': '${:.2f}',
+        'current_price': '${:.2f}',
+        'current_pnl': '${:.2f}'
     }
     
     # Fill NaN numerical fields to prevent format errors on pre-migration rows
@@ -114,13 +134,39 @@ if not open_trades.empty:
                 open_trades[col] = open_trades[col].fillna(0.0)
         else:
             if col == 'peak_price':
-                open_trades['peak_price'] = open_trades['entry_polymarket_price']
+                open_trades['peak_price'] = open_trades.get('entry_polymarket_price', 0.0)
             else:
                 open_trades[col] = 0.0
+                
+    current_prices = []
+    current_pnls = []
+    
+    for _, row in open_trades.iterrows():
+        token_id = row.get('token_id')
+        entry_price = float(row.get('entry_polymarket_price', 0))
+        size_usdc = float(row.get('size_usdc', 0))
+        
+        # When we sell, we take the BID price
+        if token_id and live_trader and entry_price > 0:
+            live_bid = live_trader.get_live_price(token_id, "SELL")
+            if live_bid is not None:
+                current_prices.append(live_bid)
+                shares = size_usdc / entry_price
+                pnl = (shares * live_bid) - size_usdc
+                current_pnls.append(pnl)
+            else:
+                current_prices.append(entry_price)
+                current_pnls.append(0.0)
+        else:
+            current_prices.append(entry_price)
+            current_pnls.append(0.0)
+            
+    open_trades['current_price'] = current_prices
+    open_trades['current_pnl'] = current_pnls
         
     display_open = open_trades[[
         'id', 'market_title', 'direction', 'barrier', 'entry_polymarket_price', 
-        'peak_price', 'entry_model_prob', 'size_usdc', 'expiry_timestamp', 'created_at'
+        'current_price', 'current_pnl', 'peak_price', 'entry_model_prob', 'size_usdc', 'expiry_timestamp', 'created_at'
     ]].copy()
     
     st.dataframe(display_open.style.format(format_dict), use_container_width=True)
@@ -173,3 +219,8 @@ st.sidebar.markdown(f"- **Take Profit:** {30.00:.2f}%")
 st.sidebar.markdown(f"- **Trail Activation:** {20.00:.2f}%")
 st.sidebar.markdown(f"- **Trail Distance:** {15.00:.2f}pp")
 st.sidebar.markdown(f"- **Concurrent Positions:** {True}")
+
+if auto_refresh:
+    import time
+    time.sleep(10)
+    st.rerun()

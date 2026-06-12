@@ -74,12 +74,27 @@ def run_polymarket_script(verbose: bool = False, json_path: Path = None):
     json_file = json_path or DEFAULT_POLYMARKET_JSON
 
     # Run with --json flag
-    result = subprocess.run(
-        [sys.executable, str(script_path), "--json", str(json_file)],
-        capture_output=True,
-        text=True
-    )
-    output = result.stdout
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--json", str(json_file)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        output = result.stdout
+    except subprocess.TimeoutExpired as e:
+        print(f"[ERROR] polymarket_btc_daily.py timed out")
+        return {
+            "barrier": None,
+            "hours_remaining": 0,
+            "hours": 0,
+            "minutes": 0,
+            "prob_up": None,
+            "prob_down": None,
+            "current_price": None,
+            "raw_output": "",
+            "error": "TimeoutExpired"
+        }
 
     # Check for subprocess failure
     if result.returncode != 0:
@@ -126,6 +141,7 @@ def run_polymarket_script(verbose: bool = False, json_path: Path = None):
                 "market_title": data.get("market_title"),
                 "token_up": data.get("token_up"),
                 "token_down": data.get("token_down"),
+                "expiry_timestamp": data.get("expiry_timestamp"),
                 "raw_output": output
             }
             if verbose:
@@ -226,13 +242,27 @@ def run_terminal_script(barrier: float, hours: float, verbose: bool = False,
         days = hours / 24.0
         cmd.extend(["--ttm", str(days)])
 
+    # Skip Heston because it causes ProcessPoolExecutor hangs and server resource leaks
+    cmd.append("--skip-heston")
+
     # Run with --output flag for JSON
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True
-    )
-    output = result.stdout
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=90  # Add timeout to prevent hanging forever
+        )
+        output = result.stdout
+    except subprocess.TimeoutExpired as e:
+        print(f"[ERROR] cli_terminal.py timed out after 90 seconds")
+        return {
+            "prob_above": None,
+            "prob_below": None,
+            "spot_price": None,
+            "raw_output": "",
+            "error": "TimeoutExpired"
+        }
 
     # Check for subprocess failure
     if result.returncode != 0:

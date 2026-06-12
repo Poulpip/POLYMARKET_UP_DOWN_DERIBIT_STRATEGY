@@ -36,7 +36,9 @@ from btc_pricer.cli.common import (
     parse_expiry_date,
     fit_ssvi_surface_for_ttm,
     get_atm_iv_from_nearest_expiry,
+    _prepare_expiry_surface,
 )
+from btc_pricer.data.filters import DataFilter
 from btc_pricer.utils.time_parser import (
     parse_datetime_with_timezone,
     calculate_ttm_to_target,
@@ -714,16 +716,51 @@ def run_terminal(args, config, logger):
         logger.info(f"Auto-selected expiry: {auto_expiry}")
 
         _t0_cal = _time.time()
-        heston_data, ssvi_data, spot_price, calibration_expiry, forward, _ = calibrate_to_expiry(
-            client, config, auto_expiry, return_both=True
-        )
+        
+        if args.skip_heston:
+            logger.info("Skipping Heston calibration (--skip-heston)")
+            options_by_expiry = client.fetch_all_options("BTC")
+            if not options_by_expiry:
+                raise DeribitAPIError("No options data received")
+            auto_expiry = find_closest_expiry_after(options_by_expiry, target_utc)
+            spot_price = list(options_by_expiry.values())[0][0].spot_price
+            spot_price, _ = fetch_spot_with_fallback(spot_price)
+            data_filter = DataFilter(config.filters)
+            surface = _prepare_expiry_surface(auto_expiry, options_by_expiry[auto_expiry], data_filter, config, logger)
+            calibration_expiry = auto_expiry
+            forward = surface[1] if surface else spot_price
+            heston_data = None
+            ssvi_data = None
+            ttm = ttm_from_until
+        else:
+            heston_data, ssvi_data, spot_price, calibration_expiry, forward, _ = calibrate_to_expiry(
+                client, config, auto_expiry, return_both=True
+            )
+            ttm = ttm_from_until
         _calibration_elapsed = _time.time() - _t0_cal
-        ttm = ttm_from_until
     else:
         _t0_cal = _time.time()
-        heston_data, ssvi_data, spot_price, calibration_expiry, forward, ttm = calibrate_to_expiry(
-            client, config, args.expiry, return_both=True
-        )
+        
+        if args.skip_heston:
+            logger.info("Skipping Heston calibration (--skip-heston)")
+            options_by_expiry = client.fetch_all_options("BTC")
+            if not options_by_expiry:
+                raise DeribitAPIError("No options data received")
+            # Get closest expiry or requested
+            auto_expiry = args.expiry if args.expiry else sorted(options_by_expiry.keys())[0]
+            spot_price = list(options_by_expiry.values())[0][0].spot_price
+            spot_price, _ = fetch_spot_with_fallback(spot_price)
+            data_filter = DataFilter(config.filters)
+            surface = _prepare_expiry_surface(auto_expiry, options_by_expiry[auto_expiry], data_filter, config, logger)
+            calibration_expiry = auto_expiry
+            forward = surface[1] if surface else spot_price
+            heston_data = None
+            ssvi_data = None
+            ttm = surface[2] if surface else (args.ttm / 365.0 if args.ttm else 0.0)
+        else:
+            heston_data, ssvi_data, spot_price, calibration_expiry, forward, ttm = calibrate_to_expiry(
+                client, config, args.expiry, return_both=True
+            )
         _calibration_elapsed = _time.time() - _t0_cal
 
         if args.ttm is not None:
@@ -976,6 +1013,11 @@ def main():
         default=None,
         help="Target end time with timezone (e.g., '11:59 PM ET', '2026-01-30 18:00 PST'). "
              "Auto-selects closest expiry after target."
+    )
+    parser.add_argument(
+        "--skip-heston",
+        action="store_true",
+        help="Skip Heston calibration entirely for speed"
     )
 
     # Intraday-specific arguments

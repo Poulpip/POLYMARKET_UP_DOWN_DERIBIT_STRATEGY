@@ -3,9 +3,11 @@ import logging
 from datetime import datetime
 from contextlib import contextmanager
 
+from config import Config
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = "paper_trades.db"
+DB_PATH = "live_trades.db" if Config.LIVE_MODE else "paper_trades.db"
 
 def init_db():
     """Initialize the SQLite database with the paper trades schema."""

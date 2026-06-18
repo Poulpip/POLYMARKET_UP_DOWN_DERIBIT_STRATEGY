@@ -20,6 +20,8 @@ class Config:
     
     # Execution Settings
     MAX_USDC_PER_TRADE = float(os.environ.get('MAX_USDC_PER_TRADE', '5.0'))
+    STOP_LOSS_PCT = float(os.environ.get('STOP_LOSS_PCT', '0.40'))  # -40% SL (video Instance 1271)
+    TIMEFRAME = os.environ.get('TIMEFRAME', 'daily')  # 'daily' or '15min'
     
     # Proxies (if required)
     SOCKS_PROXY = os.environ.get('SOCKS_PROXY')

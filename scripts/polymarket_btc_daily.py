@@ -106,12 +106,16 @@ def find_closest_active_market(data):
     """Filter for closest non-expired market matching the daily pattern."""
     now = datetime.now(timezone.utc)
 
-    # Patterns to match both title formats:
+    # Patterns to match all BTC Up/Down market title formats:
     # "Bitcoin Up or Down on January 28?" (daily)
-    # "Bitcoin Up or Down - January 28, 8AM ET" (hourly)
+    # "Bitcoin Up or Down - January 28, 8AM ET" (hourly/sub-daily)
+    # "Bitcoin 15-Minute Up or Down - January 28, 8:15AM ET" (15-min)
+    # "Bitcoin Up or Down - January 28, 8:15 AM ET" (15-min variant)
     patterns = [
         re.compile(r"Bitcoin Up or Down on \w+ \d+\??", re.IGNORECASE),
         re.compile(r"Bitcoin Up or Down - \w+ \d+,", re.IGNORECASE),
+        re.compile(r"Bitcoin 15.?Min\w* Up or Down", re.IGNORECASE),
+        re.compile(r"Bitcoin \d+-Min\w* Up or Down", re.IGNORECASE),
     ]
 
     # The API returns events in a dict with 'events' key

@@ -9,24 +9,33 @@ from config import Config, logger
 
 # Local imports
 from strategy_runner import evaluate_market_edge
-from db_manager import init_db, record_paper_trade, get_open_trades, close_paper_trade, update_peak_price
+from db_manager import init_db, record_paper_trade, get_open_trades, get_closed_trades, close_paper_trade, update_peak_price, update_tp_order_id
 from live_client import LiveTrader
 from market_ws import MarketWebsocket
 from scripts.polymarket_edge import _has_edge
 
-# Trade parameter constants (robust backtest configuration)
-TAKE_PROFIT_PCT = 0.30
+# Trade parameter constants — aligned with video Instance 1271 configuration
+TAKE_PROFIT_PCT = 0.30       # +30% TP (video Instance 1271)
+STOP_LOSS_PCT = getattr(Config, 'STOP_LOSS_PCT', 0.40)  # -40% SL (video Instance 1271)
 TRAIL_ACTIVATION_PCT = 0.20
 TRAIL_DISTANCE_PCT = 0.15
 ALLOW_CONCURRENT = False
 
-ALPHA_UP = 2.0
-ALPHA_DOWN = 1.0
-FLOOR_UP = 0.65
-FLOOR_DOWN = 0.55
+REENTRY_COOLDOWN_MINUTES = 60
+REENTRY_EDGE_MULTIPLIER = 1.5
+
+# Video Instance 1271: alpha=2.5, floor=0.45 (symmetric UP/DOWN)
+ALPHA_UP = 2.5
+ALPHA_DOWN = 2.5
+FLOOR_UP = 0.45
+FLOOR_DOWN = 0.45
 
 TRADE_SIZE_USDC = getattr(Config, 'MAX_USDC_PER_TRADE', 100.0)
 MAX_ENTRY_PRICE = 0.99  # Never buy above 99¢ — no meaningful upside after fees
+
+# Timing constants per timeframe
+TIMEFRAME = getattr(Config, 'TIMEFRAME', 'daily')
+SLEEP_SECONDS = 60 if TIMEFRAME == '15min' else 300  # 1min poll for 15min, 5min for daily
 
 live_trader = LiveTrader()
 market_ws = MarketWebsocket()
@@ -54,6 +63,7 @@ def on_ws_price_update(token_id, bid, ask):
             take_profit_target = entry_price * (1 + TAKE_PROFIT_PCT)
             activation_target = entry_price * (1 + TRAIL_ACTIVATION_PCT)
             trail_level = peak_price - entry_price * TRAIL_DISTANCE_PCT
+            stop_loss_target = entry_price * (1 - STOP_LOSS_PCT)
             
             exit_triggered = False
             exit_reason = None
@@ -67,6 +77,10 @@ def on_ws_price_update(token_id, bid, ask):
                 exit_triggered = True
                 exit_reason = "TRAIL"
                 exit_price = trail_level
+            elif bid <= stop_loss_target:
+                exit_triggered = True
+                exit_reason = "SL"
+                exit_price = bid
                 
             if exit_triggered:
                 with sell_lock:
@@ -77,6 +91,12 @@ def on_ws_price_update(token_id, bid, ask):
                 logger.info(f"⚡ INSTANT EXIT via WebSocket ({exit_reason}) for {trade['direction']}!")
                 logger.info(f"Entry: ${entry_price:.3f} | Exit: ${exit_price:.3f} | Bid: ${bid:.3f}")
                 
+                # Cancel open TP limit order if exists
+                tp_order_id = trade.get('tp_order_id')
+                if tp_order_id:
+                    live_trader.cancel_order(tp_order_id)
+                    update_tp_order_id(trade['id'], None)
+
                 # Execute Sell Live
                 size_shares = trade['size_usdc'] / entry_price
                 result = live_trader.execute_market_trade(token_id, "SELL", size_shares, exit_price)
@@ -109,6 +129,7 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                 take_profit_target = entry_price * (1 + TAKE_PROFIT_PCT)
                 activation_target = entry_price * (1 + TRAIL_ACTIVATION_PCT)
                 trail_level = peak_price - entry_price * TRAIL_DISTANCE_PCT
+                stop_loss_target = entry_price * (1 - STOP_LOSS_PCT)
                 
                 exit_triggered = False
                 exit_reason = None
@@ -122,6 +143,10 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                     exit_triggered = True
                     exit_reason = "TRAIL"
                     exit_price = trail_level
+                elif current_price <= stop_loss_target:
+                    exit_triggered = True
+                    exit_reason = "SL"
+                    exit_price = current_price
                     
                 if exit_triggered:
                     with sell_lock:
@@ -131,6 +156,12 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                         
                     logger.info(f"EXIT (REST Polling) ({exit_reason}) for {direction} on {current_market_title}!")
                     
+                    # Cancel open TP limit order if exists
+                    tp_order_id = trade.get('tp_order_id')
+                    if tp_order_id:
+                        live_trader.cancel_order(tp_order_id)
+                        update_tp_order_id(trade['id'], None)
+
                     size_shares = trade['size_usdc'] / entry_price
                     result = live_trader.execute_market_trade(trade['token_id'], "SELL", size_shares, exit_price)
                     
@@ -140,6 +171,7 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
 
 def resolve_expired_trades():
     """Query Binance for BTC price at expiry of any open trades that have expired and resolve them."""
+    import re
     from scripts.polymarket_btc_daily import get_binance_price
     
     open_trades = get_open_trades()
@@ -147,48 +179,70 @@ def resolve_expired_trades():
     
     for trade in open_trades:
         expiry_str = trade.get('expiry_timestamp')
-        if not expiry_str:
-            continue
-            
-        try:
-            expiry_dt = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
-        except Exception:
-            continue
-            
-        if now >= expiry_dt:
-            logger.info(f"⏳ Trade {trade['id']} ({trade['market_title']}) has expired. Resolving...")
-            
-            # Fetch BTC price at expiry
-            spot_price = None
+        expired = False
+        expiry_dt = None
+        
+        if expiry_str:
             try:
-                spot_price = get_binance_price(expiry_dt)
-            except Exception as e:
-                logger.error(f"Error fetching Binance price at expiry: {e}")
-                
-            if spot_price is None:
-                # Fallback to current BTC price if specific candle is not available yet
+                expiry_dt = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+                expired = now >= expiry_dt
+            except Exception:
+                pass
+        else:
+            # Fallback: parse date from market title (e.g. "Bitcoin Up or Down on June 11?")
+            match = re.search(r'June (\d+)', trade.get('market_title', ''))
+            if match:
+                day = int(match.group(1))
+                # Build an approximate expiry: 16:00 UTC on that day
                 try:
-                    from scripts.polymarket_btc_daily import get_current_btc_price
-                    spot_price = get_current_btc_price()
-                except Exception:
+                    expiry_dt = datetime(now.year, now.month, day, 16, 0, 0, tzinfo=timezone.utc)
+                    expired = now >= expiry_dt
+                except ValueError:
                     pass
-                    
-            if spot_price is not None:
-                barrier = trade.get('barrier')
-                direction = trade['direction']
+        
+        if not expired:
+            continue
+            
+        logger.info(f"⏳ Trade {trade['id']} ({trade['market_title']}) has expired. Resolving...")
+        
+        # Fetch BTC price at expiry
+        spot_price = None
+        try:
+            if expiry_dt:
+                spot_price = get_binance_price(expiry_dt)
+        except Exception as e:
+            logger.error(f"Error fetching Binance price at expiry: {e}")
+            
+        if spot_price is None:
+            # Fallback to current BTC price if specific candle is not available yet
+            try:
+                from scripts.polymarket_btc_daily import get_current_btc_price
+                spot_price = get_current_btc_price()
+            except Exception:
+                pass
                 
-                # Determine win/loss
-                if direction == 'UP':
-                    won = spot_price >= barrier
-                else:
-                    won = spot_price < barrier
-                    
-                exit_price = 1.0 if won else 0.0
-                realized_pnl = (trade['size_usdc'] / trade['entry_polymarket_price']) * exit_price - trade['size_usdc']
-                exit_reason = "WIN_EXPIRY" if won else "LOSS_EXPIRY"
+        if spot_price is not None:
+            barrier = trade.get('barrier')
+            direction = trade['direction']
+            
+            # Determine win/loss
+            if direction == 'UP':
+                won = spot_price >= barrier
+            else:
+                won = spot_price < barrier
                 
-                close_paper_trade(trade['id'], exit_price, realized_pnl, exit_reason=exit_reason)
-                logger.info(f"Resolved expired trade {trade['id']}: Direction={direction}, Spot={spot_price:.2f}, Barrier={barrier:.2f}, Result={exit_reason}, PnL=${realized_pnl:.2f}")
+            exit_price = 1.0 if won else 0.0
+            realized_pnl = (trade['size_usdc'] / trade['entry_polymarket_price']) * exit_price - trade['size_usdc']
+            exit_reason = "WIN_EXPIRY" if won else "LOSS_EXPIRY"
+            
+            # Cancel open TP limit order if exists
+            tp_order_id = trade.get('tp_order_id')
+            if tp_order_id:
+                live_trader.cancel_order(tp_order_id)
+                update_tp_order_id(trade['id'], None)
+            
+            close_paper_trade(trade['id'], exit_price, realized_pnl, exit_reason=exit_reason)
+            logger.info(f"Resolved expired trade {trade['id']}: Direction={direction}, Spot={spot_price:.2f}, Barrier={barrier:.2f}, Result={exit_reason}, PnL=${realized_pnl:.2f}")
 
 def update_ws_subscriptions():
     """Ensure websocket is listening to all current open position tokens."""
@@ -231,6 +285,7 @@ def run_loop():
                 
                 # 2. Check for New Opportunities
                 open_trades = get_open_trades()
+                closed_trades = get_closed_trades()
                 
                 for opp in opportunities:
                     direction = opp['direction']
@@ -238,11 +293,42 @@ def run_loop():
                     model_prob = opp['model_prob']
                     token_id = opp.get('token_id')
                     
+                    same_direction_open = any(
+                        t['market_title'] == market_title and t['direction'] == direction 
+                        for t in open_trades
+                    )
+                    
+                    if same_direction_open:
+                        logger.info(f"Already hold an OPEN {direction} position for {market_title}. Skipping duplicate entry.")
+                        continue
+                        
+                    last_closed = next((t for t in sorted(closed_trades, key=lambda x: x.get('closed_at') or '', reverse=True) 
+                                        if t['market_title'] == market_title and t['direction'] == direction), None)
+                    if last_closed:
+                        closed_at_str = last_closed.get('closed_at')
+                        if closed_at_str:
+                            try:
+                                closed_at_dt = datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S.%f')
+                            except ValueError:
+                                closed_at_dt = datetime.strptime(closed_at_str, '%Y-%m-%d %H:%M:%S')
+                            
+                            mins_since_closed = (datetime.utcnow() - closed_at_dt).total_seconds() / 60.0
+                            prev_edge = last_closed['entry_model_prob'] - last_closed['entry_polymarket_price']
+                            curr_edge = model_prob - market_entry
+                            
+                            if curr_edge >= prev_edge * REENTRY_EDGE_MULTIPLIER:
+                                logger.info(f"🔥 OVERRIDE COOLDOWN: New edge ({curr_edge:.4f}) is >= {REENTRY_EDGE_MULTIPLIER}x stronger than previous edge ({prev_edge:.4f}). Re-entering!")
+                            elif mins_since_closed < REENTRY_COOLDOWN_MINUTES:
+                                logger.info(f"Cooldown active for {market_title} {direction}. Closed {mins_since_closed:.1f}m ago (requires {REENTRY_COOLDOWN_MINUTES}m). Skipping.")
+                                continue
+                            else:
+                                logger.info(f"Cooldown expired for {market_title} {direction} ({mins_since_closed:.1f}m > {REENTRY_COOLDOWN_MINUTES}m). Allowing re-entry.")
+                                
                     opposite_open = any(
                         t['market_title'] == market_title and t['direction'] != direction 
                         for t in open_trades
                     )
-                    
+                        
                     if (ALLOW_CONCURRENT or not opposite_open) and token_id:
                         logger.info(f"[PREDICTION] Market: {market_title} | Side: {direction} | Polymarket Price: ${market_entry:.4f} | Model Prob: {model_prob:.4f} | Eval Latency: {eval_latency:.2f}s")
                         if market_entry > MAX_ENTRY_PRICE:
@@ -278,7 +364,7 @@ def run_loop():
                             logger.error(f"Live trade failed! Not recording to database. Error: {trade_res.get('error')}")
                         else:
                             # Record trade to database
-                            record_paper_trade(
+                            trade_id = record_paper_trade(
                                 market_title=market_title,
                                 direction=direction,
                                 entry_price=market_entry,
@@ -292,6 +378,20 @@ def run_loop():
                             )
                             # Instantly add to WS subscription to track price
                             update_ws_subscriptions()
+                            
+                            # Execute Limit Sell Order for TP
+                            trade_shares = TRADE_SIZE_USDC / market_entry
+                            tp_price = min(0.99, market_entry + (market_entry * TAKE_PROFIT_PCT))
+                            
+                            # Wait 3 seconds for Polymarket subgraph/indexer to update our token balance
+                            if Config.LIVE_MODE:
+                                logger.info("Waiting 3 seconds for token balance indexer to update...")
+                                time.sleep(3.0)
+                                
+                            tp_res = live_trader.execute_limit_order(token_id, "SELL", trade_shares, tp_price)
+                            if tp_res.get('status') in ('placed', 'paper'):
+                                tp_order_id = tp_res.get('order_id')
+                                update_tp_order_id(trade_id, tp_order_id)
                     elif not token_id:
                         logger.warning(f"Edge exists but no token_id found for {direction}.")
                     else:
@@ -302,8 +402,8 @@ def run_loop():
         except Exception as e:
             logger.error(f"Error in trading loop: {e}", exc_info=True)
             
-        logger.info("Sleeping for 5 minutes...")
-        time.sleep(300)
+        logger.info(f"Sleeping for {SLEEP_SECONDS}s ({TIMEFRAME} mode)...")
+        time.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
     run_loop()

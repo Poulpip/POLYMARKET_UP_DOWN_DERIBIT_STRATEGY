@@ -6,3 +6,4 @@ pandas
 matplotlib
 pytest
 QuantLib  # Optional: for improved numerical precision in option pricing
+redis

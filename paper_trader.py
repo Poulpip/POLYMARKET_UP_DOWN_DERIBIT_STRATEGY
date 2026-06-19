@@ -172,7 +172,7 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
 def resolve_expired_trades():
     """Query Binance for BTC price at expiry of any open trades that have expired and resolve them."""
     import re
-    from scripts.polymarket_btc_daily import get_binance_price
+    from scripts.polymarket_btc_markets import get_binance_price
     
     open_trades = get_open_trades()
     now = datetime.now(timezone.utc)
@@ -216,7 +216,7 @@ def resolve_expired_trades():
         if spot_price is None:
             # Fallback to current BTC price if specific candle is not available yet
             try:
-                from scripts.polymarket_btc_daily import get_current_btc_price
+                from scripts.polymarket_btc_markets import get_current_btc_price
                 spot_price = get_current_btc_price()
             except Exception:
                 pass
@@ -270,8 +270,11 @@ def run_loop():
             
             loop_start = time.time()
             result = evaluate_market_edge(
-                alpha_up=ALPHA_UP, alpha_down=ALPHA_DOWN,
-                floor_up=FLOOR_UP, floor_down=FLOOR_DOWN
+                alpha_up=ALPHA_UP, 
+                alpha_down=ALPHA_DOWN, 
+                floor_up=FLOOR_UP, 
+                floor_down=FLOOR_DOWN,
+                timeframe=TIMEFRAME
             )
             eval_latency = time.time() - loop_start
             

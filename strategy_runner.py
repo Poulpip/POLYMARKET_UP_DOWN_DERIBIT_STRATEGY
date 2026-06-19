@@ -19,14 +19,14 @@ except ImportError as e:
 
 from config import logger
 
-def evaluate_market_edge(alpha_up=1.5, alpha_down=1.5, floor_up=0.35, floor_down=0.35):
+def evaluate_market_edge(alpha_up=1.5, alpha_down=1.5, floor_up=0.35, floor_down=0.35, timeframe="daily"):
     """
     Evaluates the active daily BTC market against Deribit options to find edges.
     Returns:
-        dict: Containing 'poly_data', 'model_data', and a list of 'opportunities'.
+        EdgeResult with market details and decision.
     """
-    logger.info("Fetching active Polymarket Daily BTC data...")
-    poly_data = run_polymarket_script(verbose=False)
+    logger.info(f"Fetching active Polymarket BTC data ({timeframe})...")
+    poly_data = run_polymarket_script(verbose=False, timeframe=timeframe)
     
     if poly_data.get("barrier") is None:
         logger.warning("Could not parse Polymarket data or no active market found.")

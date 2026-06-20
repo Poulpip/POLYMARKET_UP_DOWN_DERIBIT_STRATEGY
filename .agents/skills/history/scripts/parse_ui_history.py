@@ -18,40 +18,34 @@ def parse_ui_history(file_path):
     total_invested = 0.0
     total_payout = 0.0
     
-    # Simple state machine to parse the block
+    actions = ["Achat", "Vente", "Perte", "Gain", "Échanger", "Remboursement"]
     markets = defaultdict(lambda: {"invested": 0.0, "payout": 0.0})
     
-    current_market = "Unknown Market"
-    
     for i, line in enumerate(lines):
-        if line.startswith("icon for "):
-            current_market = line.replace("icon for ", "").strip()
-            
-        elif line == "Achat" or line == "Vente":
-            # The UI lists the purchase or sale amount shortly after
-            for j in range(i+1, min(i+8, len(lines))):
-                if money_pattern.search(lines[j]):
-                    amt_str = money_pattern.search(lines[j]).group(0).replace('$', '')
-                    amt = float(amt_str)
-                    if amt < 0:
-                        total_invested += abs(amt)
-                        markets[current_market]["invested"] += abs(amt)
-                    else:
-                        total_payout += amt
-                        markets[current_market]["payout"] += amt
+        if line in actions:
+            market_name = "Unknown Market"
+            for j in range(i+1, min(i+5, len(lines))):
+                if lines[j].startswith("icon for "):
+                    market_name = lines[j].replace("icon for ", "").strip()
                     break
                     
-        elif line in ["Gain", "Perte", "Remboursement"]:
-            # For Gains or Refunds, the amount is usually displayed right below or near
-            for j in range(i+1, min(i+4, len(lines))):
+            amt = 0.0
+            for j in range(i+1, min(i+8, len(lines))):
+                # If we hit another action, stop searching for amount
+                if lines[j] in actions:
+                    break
                 if money_pattern.search(lines[j]):
                     amt_str = money_pattern.search(lines[j]).group(0).replace('$', '')
                     amt = float(amt_str)
-                    if line == "Gain" or line == "Remboursement":
-                        if amt > 0:
-                            total_payout += amt
-                            markets[current_market]["payout"] += amt
                     break
+                    
+            if amt != 0.0:
+                if amt < 0:
+                    total_invested += abs(amt)
+                    markets[market_name]["invested"] += abs(amt)
+                else:
+                    total_payout += amt
+                    markets[market_name]["payout"] += amt
 
     print("\n=== UI PARSED TRADING REPORT ===")
     for market, data in markets.items():

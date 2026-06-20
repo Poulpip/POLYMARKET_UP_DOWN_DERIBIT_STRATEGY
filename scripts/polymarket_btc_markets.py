@@ -67,6 +67,38 @@ def parse_reference_time(description):
     return times[0] if times else None
 
 
+def parse_title_reference_time(title):
+    """Extract the barrier/reference time from titles like 'Bitcoin Up or Down - June 19, 11:00AM-11:05AM ET'."""
+    # Match: "June 19, 11:00AM" or "Jun 19, 11:00AM"
+    pattern = r"([a-zA-Z]+)\s+(\d{1,2}),\s+(\d{1,2}):(\d{2})(AM|PM)"
+    match = re.search(pattern, title)
+    if not match:
+        return None
+    
+    month_str, day, hour, minute, ampm = match.groups()
+    months = {
+        "January": 1, "Jan": 1, "February": 2, "Feb": 2, "March": 3, "Mar": 3,
+        "April": 4, "Apr": 4, "May": 5, "June": 6, "Jun": 6,
+        "July": 7, "Jul": 7, "August": 8, "Aug": 8, "September": 9, "Sep": 9,
+        "October": 10, "Oct": 10, "November": 11, "Nov": 11, "December": 12, "Dec": 12
+    }
+    month = months.get(month_str)
+    if not month:
+        return None
+    
+    h = int(hour)
+    if ampm == "PM" and h != 12:
+        h += 12
+    elif ampm == "AM" and h == 12:
+        h = 0
+        
+    now = datetime.now(timezone.utc)
+    et_tz = ZoneInfo("America/New_York")
+    et_dt = datetime(now.year, month, int(day), h, int(minute), tzinfo=et_tz)
+    
+    return et_dt.astimezone(timezone.utc)
+
+
 def parse_resolution_time(description):
     """Extract the resolution candle time (second date) from the description."""
     times = _parse_all_reference_times(description)
@@ -74,7 +106,16 @@ def parse_resolution_time(description):
 
 
 def get_binance_price(timestamp_utc):
-    """Fetch BTC/USDT close price for a specific 1-minute candle from Binance."""
+    """Fetch BTC/USDT close price for a specific 1-minute candle from Binance.
+    
+    Result is cached in Redis for 30 seconds — the barrier candle price does not
+    change once the candle is closed, so this is always safe to cache.
+    """
+    cache_key = f"binance_kline_{int(timestamp_utc.timestamp())}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached.get("price")
+
     url = f"{BINANCE_URL}/klines"
     start_time_ms = int(timestamp_utc.timestamp() * 1000)
 
@@ -91,20 +132,30 @@ def get_binance_price(timestamp_utc):
 
     if data:
         # Kline format: [open_time, open, high, low, close, volume, ...]
-        return float(data[0][4])
+        price = float(data[0][4])
+        cache_set(cache_key, {"price": price}, 30)
+        return price
     return None
 
 
 def get_current_btc_price():
-    """Fetch current BTC/USDT price from Binance."""
+    """Fetch current BTC/USDT price from Binance.
+    
+    Cached in Redis for 10 seconds to avoid hammering Binance on rapid cycles.
+    """
+    cached = cache_get("binance_spot")
+    if cached is not None:
+        return cached.get("price")
+
     url = f"{BINANCE_URL}/ticker/price"
     params = {"symbol": "BTCUSDT"}
 
     response = requests.get(url, params=params, timeout=10)
     response.raise_for_status()
     data = response.json()
-
-    return float(data.get("price", 0))
+    price = float(data.get("price", 0))
+    cache_set("binance_spot", {"price": price}, 10)
+    return price
 
 
 def search_btc_daily_markets(timeframe="daily"):
@@ -137,34 +188,47 @@ def search_btc_daily_markets(timeframe="daily"):
     if cached is not None:
         return cached
 
-    # Fetch from Gamma API using date-range filter (most efficient)
+    # Fetch from Gamma API using date-range filter with pagination
     url = f"{GAMMA_URL}/events"
     params = {
         "active": "true",
         "closed": "false",
-        "limit": 500,
+        "limit": 100,
+        "offset": 0,
         "end_date_min": end_date_min,
         "end_date_max": end_date_max,
     }
-    try:
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, list):
-            return []
+    
+    all_data = []
+    while True:
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, list) or not data:
+                break
+            
+            all_data.extend(data)
+            
+            # If we received fewer items than the limit, we've reached the end
+            if len(data) < params["limit"]:
+                break
+                
+            params["offset"] += params["limit"]
+        except Exception as e:
+            # Polymarket API returns 422 when offset is too large (e.g. >2000)
+            break
 
-        # Filter for BTC events only
-        btc_items = [
-            e for e in data
-            if 'bitcoin' in str(e.get('title', '')).lower()
-            or 'btc' in str(e.get('title', '')).lower()
-        ]
+    # Filter for BTC events only
+    btc_items = [
+        e for e in all_data
+        if 'bitcoin' in str(e.get('title', '')).lower()
+        or 'btc' in str(e.get('title', '')).lower()
+    ]
 
-        # Store in Redis cache
-        cache_set(cache_key, btc_items, cache_ttl)
-        return btc_items
-    except Exception:
-        return []
+    # Store in Redis cache
+    cache_set(cache_key, btc_items, cache_ttl)
+    return btc_items
 
 
 def find_closest_active_market(data, timeframe="daily"):
@@ -193,7 +257,6 @@ def find_closest_active_market(data, timeframe="daily"):
         # Excludes 15min time-range titles
         patterns = [
             re.compile(r"Bitcoin Up or Down on \w+ \d+\??", re.IGNORECASE),
-            re.compile(r"Bitcoin Up or Down - \w+ \d+, \d{1,2}(?:AM|PM) ET$", re.IGNORECASE),
             re.compile(r"BTC Up or Down on \w+ \d+\??", re.IGNORECASE),
         ]
         hourly_exclude = None
@@ -226,7 +289,7 @@ def find_closest_active_market(data, timeframe="daily"):
                 start_min = to_min(h1, m1, ap1)
                 end_min = to_min(h2, m2, ap2)
                 span = (end_min - start_min) % (24 * 60)
-                if span > 20:  # reject multi-hour brackets
+                if not (10 <= span <= 20):  # reject 5-min markets and multi-hour brackets
                     continue
 
         # Skip closed markets
@@ -306,6 +369,9 @@ def market_to_dict(event):
 
     # Get reference price (barrier) from Binance
     ref_time = parse_reference_time(description)
+    if not ref_time:
+        ref_time = parse_title_reference_time(title)
+
     if ref_time:
         try:
             ref_price = get_binance_price(ref_time)

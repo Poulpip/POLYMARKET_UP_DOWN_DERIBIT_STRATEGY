@@ -59,111 +59,53 @@ def _parse_polymarket_stdout(output: str) -> dict:
     }
 
 
-def run_polymarket_script(verbose: bool = False, json_path: Path = None):
-    """Run polymarket_btc_daily.py and parse output.
+def run_polymarket_script(verbose: bool = False, json_path: Path = None, timeframe: str = "daily"):
+    """Fetch and parse the active BTC market directly in-process (no subprocess).
+
+    Replaces the old subprocess.run(polymarket_btc_markets.py) approach.
+    All underlying HTTP calls (Gamma, Binance, Chainlink) are now Redis-cached,
+    so repeat calls within the TTL window are served from memory.
 
     Args:
-        verbose: Print raw script output
-        json_path: Path for JSON output file (uses default if None)
+        verbose: Print debug info
+        json_path: Unused (kept for API compatibility)
+        timeframe: "daily" or "15min"
 
     Returns:
         Dictionary with market data
     """
-    script_dir = Path(__file__).parent
-    script_path = script_dir / "polymarket_btc_daily.py"
-    json_file = json_path or DEFAULT_POLYMARKET_JSON
+    from scripts.polymarket_btc_markets import (
+        search_btc_daily_markets,
+        find_closest_active_market,
+        market_to_dict,
+    )
 
-    # Run with --json flag
+    _empty = {
+        "barrier": None, "hours_remaining": 0, "hours": 0, "minutes": 0,
+        "prob_up": None, "prob_down": None, "current_price": None,
+        "market_title": None, "token_up": None, "token_down": None,
+        "expiry_timestamp": None, "raw_output": "",
+    }
+
     try:
-        result = subprocess.run(
-            [sys.executable, str(script_path), "--json", str(json_file)],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        output = result.stdout
-    except subprocess.TimeoutExpired as e:
-        print(f"[ERROR] polymarket_btc_daily.py timed out")
-        return {
-            "barrier": None,
-            "hours_remaining": 0,
-            "hours": 0,
-            "minutes": 0,
-            "prob_up": None,
-            "prob_down": None,
-            "current_price": None,
-            "raw_output": "",
-            "error": "TimeoutExpired"
-        }
+        if verbose:
+            print(f"[DEBUG] Fetching BTC markets in-process (timeframe={timeframe})")
+        data = search_btc_daily_markets(timeframe=timeframe)
+        event = find_closest_active_market(data, timeframe=timeframe)
+        if event is None:
+            print(f"[WARN] No active Bitcoin Up/Down {timeframe} market found")
+            return _empty
+        result = market_to_dict(event)
+        if result is None:
+            return _empty
+        if verbose:
+            print(f"[DEBUG] Polymarket in-process: barrier={result.get('barrier')}, "
+                  f"prob_up={result.get('prob_up')}, prob_down={result.get('prob_down')}")
+        return result
+    except Exception as e:
+        print(f"[ERROR] run_polymarket_script in-process failed: {e}")
+        return _empty
 
-    # Check for subprocess failure
-    if result.returncode != 0:
-        print(f"[ERROR] polymarket_btc_daily.py failed with code {result.returncode}")
-        if result.stderr:
-            print(f"[ERROR] stderr: {result.stderr[:500]}")
-        if not output:
-            print(f"[ERROR] stdout was empty")
-        # Return dict with None values to signal failure
-        return {
-            "barrier": None,
-            "hours_remaining": 0,
-            "hours": 0,
-            "minutes": 0,
-            "prob_up": None,
-            "prob_down": None,
-            "current_price": None,
-            "raw_output": output,
-            "error": result.stderr
-        }
-
-    if verbose:
-        print(f"[DEBUG] polymarket_btc_daily.py completed (returncode=0)")
-        print("=== Polymarket Script Output ===")
-        print(output)
-        print("================================\n")
-
-    # Try to read JSON output first
-    try:
-        if json_file.exists():
-            if verbose:
-                print(f"[DEBUG] Reading JSON from {json_file}")
-            with open(json_file, "r") as f:
-                data = json.load(f)
-
-            result_data = {
-                "barrier": data.get("barrier"),
-                "hours_remaining": data.get("hours_remaining"),
-                "hours": data.get("hours"),
-                "minutes": data.get("minutes"),
-                "prob_up": data.get("prob_up"),
-                "prob_down": data.get("prob_down"),
-                "current_price": data.get("current_price"),
-                "market_title": data.get("market_title"),
-                "token_up": data.get("token_up"),
-                "token_down": data.get("token_down"),
-                "expiry_timestamp": data.get("expiry_timestamp"),
-                "raw_output": output
-            }
-            if verbose:
-                print(f"[DEBUG] Polymarket JSON parsed: barrier={result_data['barrier']}, "
-                      f"prob_up={result_data['prob_up']}, prob_down={result_data['prob_down']}")
-            return result_data
-        else:
-            print(f"[WARN] JSON file does not exist: {json_file}")
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[WARN] Failed to read JSON ({json_file}), falling back to regex: {e}")
-
-    # Fallback to regex parsing
-    if verbose:
-        print(f"[DEBUG] Using regex fallback for Polymarket parsing")
-    fallback_result = _parse_polymarket_stdout(output)
-    if fallback_result["barrier"] is None:
-        print(f"[ERROR] Regex fallback also failed - could not parse Polymarket data from stdout")
-        print(f"[ERROR] stdout preview: {output[:500] if output else 'EMPTY'}")
-    elif verbose:
-        print(f"[DEBUG] Regex parsed: barrier={fallback_result['barrier']}, "
-              f"prob_up={fallback_result['prob_up']}, prob_down={fallback_result['prob_down']}")
-    return fallback_result
 
 
 def _parse_terminal_stdout(output: str) -> dict:
@@ -226,9 +168,16 @@ def run_terminal_script(barrier: float, hours: float, verbose: bool = False,
     Returns:
         Dictionary with model probabilities
     """
+    import uuid
     script_dir = Path(__file__).parent.parent
     script_path = script_dir / "cli_terminal.py"
-    json_file = json_path or DEFAULT_TERMINAL_JSON
+    
+    # Use a unique temporary file for JSON output to prevent race conditions between concurrent bots
+    unique_id = uuid.uuid4().hex[:8]
+    if json_path is None:
+        json_file = script_dir / "results" / f"terminal_data_{unique_id}.json"
+    else:
+        json_file = json_path
 
     # Build command: prefer --until (correct calibration expiry) over --ttm
     cmd = [sys.executable, str(script_path),
@@ -306,8 +255,8 @@ def run_terminal_script(barrier: float, hours: float, verbose: bool = False,
                 alt_data = data.get(alt_model) or data.get("heston") or {}
 
                 result_data = {
-                    "prob_above": model_data.get("prob_above"),
-                    "prob_below": model_data.get("prob_below"),
+                    "prob_above": model_data.get("mc_prob_above", model_data.get("prob_above")),
+                    "prob_below": model_data.get("mc_prob_below", model_data.get("prob_below")),
                     "spot_price": data.get("spot_price"),
                     "raw_output": output,
                     "model_used": used_model,
@@ -390,7 +339,7 @@ def find_opportunities(poly_data: dict, model_data: dict,
             "has_edge": _has_edge(model_p, market_p, alpha_up, floor_up),
             "required_prob": req,
             "market_entry": market_p,
-            "take_profit": market_p * 1.20,
+            "take_profit": market_p * 1.30,
         })
 
     # Check DOWN opportunity (model says price ends below barrier)
@@ -408,7 +357,7 @@ def find_opportunities(poly_data: dict, model_data: dict,
             "has_edge": _has_edge(model_p, market_p, alpha_down, floor_down),
             "required_prob": req,
             "market_entry": market_p,
-            "take_profit": market_p * 1.20,
+            "take_profit": market_p * 1.30,
         })
 
     return opportunities
@@ -526,7 +475,7 @@ def main():
     args = parser.parse_args()
 
     print("Fetching Polymarket data...")
-    poly_data = run_polymarket_script(verbose=args.verbose)
+    poly_data = run_polymarket_script(verbose=args.verbose, timeframe="daily")
 
     if poly_data["barrier"] is None:
         print("Error: Could not parse Polymarket data")

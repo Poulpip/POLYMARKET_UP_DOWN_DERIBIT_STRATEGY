@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 try:
+    # pyrefly: ignore [missing-import]
     import redis
     _REDIS_AVAILABLE = True
 except ImportError:

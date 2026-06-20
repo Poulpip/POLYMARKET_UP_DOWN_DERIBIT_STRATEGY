@@ -68,18 +68,19 @@ class LiveTrader:
                 asks = ob.get('asks', []) if isinstance(ob, dict) else getattr(ob, 'asks', [])
                 if not asks:
                     return None
-                first = asks[0]
-                price_val = first.get('price') if isinstance(first, dict) else getattr(first, 'price', None)
-                return float(price_val) if price_val else None
+                prices = [float(a.get('price')) if isinstance(a, dict) else float(a.price) for a in asks]
+                return min(prices) if prices else None
             else:
                 bids = ob.get('bids', []) if isinstance(ob, dict) else getattr(ob, 'bids', [])
                 if not bids:
                     return None
-                first = bids[0]
-                price_val = first.get('price') if isinstance(first, dict) else getattr(first, 'price', None)
-                return float(price_val) if price_val else None
+                prices = [float(b.get('price')) if isinstance(b, dict) else float(b.price) for b in bids]
+                return max(prices) if prices else None
         except Exception as e:
-            logger.error(f"Failed to fetch live orderbook: {e}")
+            if "404" in str(e) or "No orderbook exists" in str(e):
+                logger.debug(f"Orderbook empty or expired for {token_id} (404)")
+            else:
+                logger.error(f"Error fetching live price for {token_id}: {e}")
             return None
 
     def execute_market_trade(self, token_id: str, side: str, size: float, price: float, min_order_size: float = 0.1):
@@ -93,8 +94,9 @@ class LiveTrader:
             
             is_limit_order = False
             
-            # Add 5% slippage tolerance to ensure market orders (FAK) match the order book
-            slippage = 0.05
+            # Add 1% slippage tolerance to ensure market orders (FAK) match the order book
+            # It will still execute at the best available price (e.g. 0.60) even if cap is 0.61
+            slippage = 0.01
             if side.upper() == 'BUY':
                 safe_price = round(min(0.99, float(price) * (1 + slippage)), 4)
             else:
@@ -164,3 +166,59 @@ class LiveTrader:
         except Exception as e:
             logger.error(f"Order failed: {e}")
             return {'status': 'failed', 'error': str(e), 'latency_ms': (time.time()-start)*1000}
+
+    def execute_limit_order(self, token_id: str, side: str, size: float, price: float) -> dict:
+        """Place a Maker Limit Order (GTC) and return the order ID."""
+        if not Config.LIVE_MODE or self.client is None:
+            logger.info(f"[PAPER_TRADE] -> execute_limit_order: {side} {size} units of {token_id} at {price}")
+            return {'status': 'paper', 'order_id': 'paper_order_123', 'exec_price': price, 'exec_size': size}
+
+        start = time.time()
+        try:
+            order_side = BUY if side.upper() == 'BUY' else SELL
+            safe_price = round(float(price), 4)
+            api_amount = round(float(size), 4)
+            
+            order_options = PartialCreateOrderOptions(tick_size='0.01', neg_risk=False)
+            
+            logger.info(f"Placing TP Limit Order: token={token_id[:16]} side={side} price={safe_price} amount={api_amount}")
+
+            result = self.client.create_and_post_order(
+                OrderArgs(token_id=token_id, price=safe_price, size=api_amount, side=order_side),
+                options=order_options
+            )
+
+            latency = (time.time() - start) * 1000
+            order_id = result.get('orderID') or result.get('id', '')
+            
+            if order_id or result.get('success'):
+                logger.info(f"✅ TP Limit Order Placed! ID: {order_id} ({latency:.1f}ms)")
+                return {'status': 'placed', 'order_id': order_id, 'latency_ms': latency}
+            else:
+                logger.error(f"❌ TP Limit Order failed: {result.get('error', result)}")
+                return {'status': 'failed', 'error': result.get('error', 'unknown')}
+        except Exception as e:
+            logger.error(f"Limit Order failed: {e}")
+            return {'status': 'failed', 'error': str(e), 'latency_ms': (time.time()-start)*1000}
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open limit order."""
+        if not Config.LIVE_MODE or self.client is None:
+            logger.info(f"[PAPER_TRADE] -> cancel_order: {order_id}")
+            return True
+
+        try:
+            logger.info(f"Cancelling order: {order_id}")
+            result = self.client.cancel_orders([order_id])
+            if str(result).lower() == 'true' or (isinstance(result, dict) and result.get('success')) or (isinstance(result, list) and len(result) > 0 and getattr(result[0], 'success', False)):
+                logger.info(f"✅ Order Cancelled! ID: {order_id}")
+                return True
+            elif isinstance(result, str) and "order is already canceled" in result.lower():
+                logger.info(f"⚠️ Order already cancelled: {order_id}")
+                return True
+            else:
+                logger.error(f"❌ Cancel Order failed for {order_id}: {result}")
+                return False
+        except Exception as e:
+            logger.error(f"Cancel Order Exception for {order_id}: {e}")
+            return False

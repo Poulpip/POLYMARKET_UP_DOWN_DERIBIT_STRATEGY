@@ -21,7 +21,13 @@ class Config:
     # Execution Settings
     MAX_USDC_PER_TRADE = float(os.environ.get('MAX_USDC_PER_TRADE', '5.0'))
     STOP_LOSS_PCT = float(os.environ.get('STOP_LOSS_PCT', '0.40'))  # -40% SL (video Instance 1271)
-    TIMEFRAME = os.environ.get('TIMEFRAME', 'daily')  # 'daily' or '15min'
+    # Parse timeframe from command line if present, else fallback to env/default
+    TIMEFRAME = os.environ.get('TIMEFRAME', 'daily')
+    import sys
+    for _i in range(len(sys.argv) - 1):
+        if sys.argv[_i] == '--timeframe':
+            TIMEFRAME = sys.argv[_i+1]
+            break
     
     # Proxies (if required)
     SOCKS_PROXY = os.environ.get('SOCKS_PROXY')
@@ -43,7 +49,8 @@ def setup_logger(name='DeribitBot'):
         # File Handler
         try:
             os.makedirs('logs', exist_ok=True)
-            fh = logging.FileHandler('logs/bot.log')
+            log_filename = f'logs/bot_{Config.TIMEFRAME}.log'
+            fh = logging.FileHandler(log_filename)
             fh.setLevel(logging.DEBUG)
             fh.setFormatter(formatter)
             logger.addHandler(fh)

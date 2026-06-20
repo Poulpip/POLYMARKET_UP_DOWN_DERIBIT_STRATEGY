@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from pathlib import Path
-
-# Setup basic config
+from config import Config
 st.set_page_config(
     page_title="Polymarket Edge - Paper Trading",
     page_icon="📈",
@@ -47,9 +46,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="main-header">⚡ Polymarket Daily Edge — Live Paper Trader</h1>', unsafe_allow_html=True)
+mode_title = "REAL LIVE TRADING" if Config.LIVE_MODE else "Live Paper Trader"
+st.markdown(f'<h1 class="main-header">⚡ Polymarket Daily Edge — {mode_title}</h1>', unsafe_allow_html=True)
 
-DB_PATH = "paper_trades.db"
+DB_PATH = "live_trades.db" if Config.LIVE_MODE else "paper_trades.db"
 
 def get_connection():
     return sqlite3.connect(DB_PATH)
@@ -209,15 +209,17 @@ st.sidebar.title("Controls")
 if st.sidebar.button("Refresh Data"):
     st.rerun()
 
+from paper_trader import ALPHA_UP, ALPHA_DOWN, FLOOR_UP, FLOOR_DOWN, TAKE_PROFIT_PCT
+from config import Config
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Strategy Parameters:**")
-st.sidebar.markdown(f"- **Alpha UP:** {2.00:.2f}")
-st.sidebar.markdown(f"- **Alpha DOWN:** {1.00:.2f}")
-st.sidebar.markdown(f"- **Floor UP:** {0.65:.2f}")
-st.sidebar.markdown(f"- **Floor DOWN:** {0.55:.2f}")
-st.sidebar.markdown(f"- **Take Profit:** {30.00:.2f}%")
-st.sidebar.markdown(f"- **Trail Activation:** {20.00:.2f}%")
-st.sidebar.markdown(f"- **Trail Distance:** {15.00:.2f}pp")
+st.sidebar.markdown(f"- **Alpha UP:** {ALPHA_UP:.2f}")
+st.sidebar.markdown(f"- **Alpha DOWN:** {ALPHA_DOWN:.2f}")
+st.sidebar.markdown(f"- **Floor UP:** {FLOOR_UP:.2f}")
+st.sidebar.markdown(f"- **Floor DOWN:** {FLOOR_DOWN:.2f}")
+st.sidebar.markdown(f"- **Take Profit:** {TAKE_PROFIT_PCT*100:.0f}%")
+st.sidebar.markdown(f"- **Stop Loss:** -{Config.STOP_LOSS_PCT*100:.0f}%")
 st.sidebar.markdown(f"- **Concurrent Positions:** {True}")
 
 if auto_refresh:

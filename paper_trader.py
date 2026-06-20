@@ -35,7 +35,7 @@ MAX_ENTRY_PRICE = 0.99  # Never buy above 99¢ — no meaningful upside after fe
 
 # Timing constants per timeframe
 TIMEFRAME = getattr(Config, 'TIMEFRAME', 'daily')
-SLEEP_SECONDS = 60 if TIMEFRAME == '15min' else 300  # 1min poll for 15min, 5min for daily
+SLEEP_SECONDS = 20 if TIMEFRAME == '15min' else 300  # 20s poll for 15min, 5min for daily
 
 live_trader = LiveTrader()
 market_ws = MarketWebsocket()
@@ -355,6 +355,10 @@ def run_loop():
                                 
                                 logger.info(f"Edge verified at live price! Gamma: ${market_entry:.4f} -> Live: ${live_ask:.4f}")
                                 market_entry = live_ask
+                                
+                                if market_entry > MAX_ENTRY_PRICE:
+                                    logger.info(f"Live entry price ${market_entry:.4f} > cap ${MAX_ENTRY_PRICE}. Skipping.")
+                                    continue
                             else:
                                 logger.warning("Could not fetch live price from orderbook. Aborting trade to avoid stale FAK.")
                                 continue
@@ -386,15 +390,19 @@ def run_loop():
                             trade_shares = TRADE_SIZE_USDC / market_entry
                             tp_price = min(0.99, market_entry + (market_entry * TAKE_PROFIT_PCT))
                             
-                            # Wait 3 seconds for Polymarket subgraph/indexer to update our token balance
-                            if Config.LIVE_MODE:
-                                logger.info("Waiting 3 seconds for token balance indexer to update...")
-                                time.sleep(3.0)
-                                
-                            tp_res = live_trader.execute_limit_order(token_id, "SELL", trade_shares, tp_price)
-                            if tp_res.get('status') in ('placed', 'paper'):
-                                tp_order_id = tp_res.get('order_id')
-                                update_tp_order_id(trade_id, tp_order_id)
+                            # Only place a limit sell if the target price is strictly above our entry price
+                            if tp_price > market_entry:
+                                # Wait 3 seconds for Polymarket subgraph/indexer to update our token balance
+                                if Config.LIVE_MODE:
+                                    logger.info("Waiting 3 seconds for token balance indexer to update...")
+                                    time.sleep(3.0)
+                                    
+                                tp_res = live_trader.execute_limit_order(token_id, "SELL", trade_shares, tp_price)
+                                if tp_res.get('status') in ('placed', 'paper'):
+                                    tp_order_id = tp_res.get('order_id')
+                                    update_tp_order_id(trade_id, tp_order_id)
+                            else:
+                                logger.info(f"TP price ${tp_price:.4f} <= entry price ${market_entry:.4f}. Skipping TP limit order, will wait for resolution.")
                     elif not token_id:
                         logger.warning(f"Edge exists but no token_id found for {direction}.")
                     else:

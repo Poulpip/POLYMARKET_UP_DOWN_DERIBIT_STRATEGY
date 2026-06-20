@@ -37,6 +37,7 @@ def fetch_polymarket_data(logger):
     Returns dict with barrier, prob_up, prob_down, title, hours_remaining or None.
     """
     try:
+        # pyrefly: ignore [missing-import]
         from scripts.polymarket_btc_daily import (
             search_btc_daily_markets,
             find_closest_active_market,

@@ -73,11 +73,11 @@ def on_ws_price_update(token_id, bid, ask):
                 exit_triggered = True
                 exit_reason = "TP"
                 exit_price = take_profit_target
-            elif peak_price >= activation_target and bid <= trail_level:
+            elif TIMEFRAME != '15min' and peak_price >= activation_target and bid <= trail_level:
                 exit_triggered = True
                 exit_reason = "TRAIL"
                 exit_price = trail_level
-            elif bid <= stop_loss_target:
+            elif TIMEFRAME != '15min' and bid <= stop_loss_target:
                 exit_triggered = True
                 exit_reason = "SL"
                 exit_price = bid
@@ -139,11 +139,11 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                     exit_triggered = True
                     exit_reason = "TP"
                     exit_price = take_profit_target
-                elif peak_price >= activation_target and current_price <= trail_level:
+                elif TIMEFRAME != '15min' and peak_price >= activation_target and current_price <= trail_level:
                     exit_triggered = True
                     exit_reason = "TRAIL"
                     exit_price = trail_level
-                elif current_price <= stop_loss_target:
+                elif TIMEFRAME != '15min' and current_price <= stop_loss_target:
                     exit_triggered = True
                     exit_reason = "SL"
                     exit_price = current_price

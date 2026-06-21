@@ -434,12 +434,41 @@ def run_loop():
                             # Instantly add to WS subscription to track price
                             update_ws_subscriptions()
                             
-                            # Execute Limit Sell Order for TP
+                            # Execute Limit Sell Order for TP (only if enough time remains)
                             trade_shares = TRADE_SIZE_USDC / market_entry
                             tp_price = min(0.99, market_entry + (market_entry * TAKE_PROFIT_PCT))
-                            
-                            # Only place a limit sell if the target price is strictly above our entry price
-                            if tp_price > market_entry:
+
+                            # Compute minutes remaining at entry to decide exit strategy
+                            expiry_ts_str = poly_data.get('expiry_timestamp')
+                            minutes_to_expiry = None
+                            if expiry_ts_str:
+                                try:
+                                    expiry_dt = datetime.strptime(expiry_ts_str, '%Y-%m-%dT%H:%M:%SZ')
+                                    minutes_to_expiry = (expiry_dt - datetime.utcnow()).total_seconds() / 60.0
+                                except Exception:
+                                    minutes_to_expiry = None
+
+                            TP_MIN_TTM_MINUTES = 5.0  # Only place TP if more than 5 min remain
+
+                            if minutes_to_expiry is not None and minutes_to_expiry < TP_MIN_TTM_MINUTES:
+                                # Late entry — hold to expiry, don't place TP/SL
+                                # The expiry resolver and WS monitor will handle the exit at resolution
+                                logger.info(
+                                    f"⏳ Late entry ({minutes_to_expiry:.1f}m to expiry < {TP_MIN_TTM_MINUTES}m threshold). "
+                                    f"Holding to expiry — no TP/SL order placed. EV={model_prob - market_entry:+.2%}"
+                                )
+                                # Still update actual token balance for accurate DB records
+                                if Config.LIVE_MODE:
+                                    logger.info("Waiting 3 seconds for token balance indexer to update...")
+                                    time.sleep(3.0)
+                                    actual_shares = live_trader.get_token_balance(token_id)
+                                    if actual_shares > 0:
+                                        logger.info(f"Queried actual token balance: {actual_shares:.4f} shares (Theoretical: {trade_shares:.4f})")
+                                        actual_spent_usdc = actual_shares * market_entry
+                                        from db_manager import update_trade_size
+                                        update_trade_size(trade_id, actual_spent_usdc)
+                            elif tp_price > market_entry:
+                                # Normal entry — place TP limit order
                                 # Wait 3 seconds for Polymarket subgraph/indexer to update our token balance
                                 if Config.LIVE_MODE:
                                     logger.info("Waiting 3 seconds for token balance indexer to update...")

@@ -148,3 +148,14 @@ def get_all_trades() -> list:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM paper_trades ORDER BY created_at DESC")
         return [dict(row) for row in cursor.fetchall()]
+
+def update_trade_size(trade_id: int, size_usdc: float):
+    """Update the actual size_usdc for a trade after execution."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE paper_trades
+            SET size_usdc = ?
+            WHERE id = ?
+        ''', (size_usdc, trade_id))
+        conn.commit()

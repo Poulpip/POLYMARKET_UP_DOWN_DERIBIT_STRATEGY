@@ -69,6 +69,7 @@ def on_ws_price_update(token_id, bid, ask):
             exit_reason = None
             exit_price = bid
             
+            direction = trade['direction']
             if bid >= take_profit_target:
                 exit_triggered = True
                 exit_reason = "TP"
@@ -77,10 +78,28 @@ def on_ws_price_update(token_id, bid, ask):
                 exit_triggered = True
                 exit_reason = "TRAIL"
                 exit_price = trail_level
-            elif TIMEFRAME != '15min' and bid <= stop_loss_target:
-                exit_triggered = True
-                exit_reason = "SL"
-                exit_price = bid
+            elif bid <= stop_loss_target:
+                # ITM-Filtered Stop Loss for 15-minute timeframe to prevent spread anomalies
+                is_otm = True
+                if TIMEFRAME == '15min':
+                    try:
+                        from scripts.chainlink_spot import get_chainlink_btc_price
+                        spot_price = get_chainlink_btc_price()
+                        barrier = trade.get('barrier')
+                        if spot_price is not None and barrier is not None:
+                            if direction == 'UP':
+                                is_otm = (spot_price <= barrier)
+                            else:
+                                is_otm = (spot_price >= barrier)
+                    except Exception as e:
+                        logger.error(f"Error checking OTM status for SL: {e}")
+                
+                if is_otm:
+                    exit_triggered = True
+                    exit_reason = "SL"
+                    exit_price = bid
+                else:
+                    logger.info(f"Skipping SL for {direction} because option is currently ITM (Spot: ${spot_price:.2f} vs Barrier: ${barrier:.2f})")
                 
             if exit_triggered:
                 with sell_lock:
@@ -97,8 +116,13 @@ def on_ws_price_update(token_id, bid, ask):
                     live_trader.cancel_order(tp_order_id)
                     update_tp_order_id(trade['id'], None)
 
-                # Execute Sell Live
-                size_shares = trade['size_usdc'] / entry_price
+                # Execute Sell Live based on actual wallet balance
+                actual_shares = live_trader.get_token_balance(token_id)
+                if actual_shares > 0:
+                    logger.info(f"Selling actual token balance: {actual_shares:.4f} shares (Theoretical: {trade['size_usdc'] / entry_price:.4f})")
+                    size_shares = actual_shares
+                else:
+                    size_shares = trade['size_usdc'] / entry_price
                 result = live_trader.execute_market_trade(token_id, "SELL", size_shares, exit_price)
                 
                 # Close Paper Trade perfectly
@@ -143,11 +167,29 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                     exit_triggered = True
                     exit_reason = "TRAIL"
                     exit_price = trail_level
-                elif TIMEFRAME != '15min' and current_price <= stop_loss_target:
-                    exit_triggered = True
-                    exit_reason = "SL"
-                    exit_price = current_price
+                elif current_price <= stop_loss_target:
+                    # ITM-Filtered Stop Loss for 15-minute timeframe to prevent spread anomalies
+                    is_otm = True
+                    if TIMEFRAME == '15min':
+                        try:
+                            from scripts.chainlink_spot import get_chainlink_btc_price
+                            spot_price = get_chainlink_btc_price()
+                            barrier = trade.get('barrier')
+                            if spot_price is not None and barrier is not None:
+                                if direction == 'UP':
+                                    is_otm = (spot_price <= barrier)
+                                else:
+                                    is_otm = (spot_price >= barrier)
+                        except Exception as e:
+                            logger.error(f"Error checking OTM status for SL: {e}")
                     
+                    if is_otm:
+                        exit_triggered = True
+                        exit_reason = "SL"
+                        exit_price = current_price
+                    else:
+                        logger.info(f"Skipping SL for {direction} because option is currently ITM (Spot: ${spot_price:.2f} vs Barrier: ${barrier:.2f})")
+                        
                 if exit_triggered:
                     with sell_lock:
                         if trade['id'] in sold_trades:
@@ -162,7 +204,13 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                         live_trader.cancel_order(tp_order_id)
                         update_tp_order_id(trade['id'], None)
 
-                    size_shares = trade['size_usdc'] / entry_price
+                    # Execute Sell Live based on actual wallet balance
+                    actual_shares = live_trader.get_token_balance(trade['token_id'])
+                    if actual_shares > 0:
+                        logger.info(f"Selling actual token balance: {actual_shares:.4f} shares (Theoretical: {trade['size_usdc'] / entry_price:.4f})")
+                        size_shares = actual_shares
+                    else:
+                        size_shares = trade['size_usdc'] / entry_price
                     result = live_trader.execute_market_trade(trade['token_id'], "SELL", size_shares, exit_price)
                     
                     realized_pnl = (size_shares * exit_price) - trade['size_usdc']
@@ -396,6 +444,14 @@ def run_loop():
                                 if Config.LIVE_MODE:
                                     logger.info("Waiting 3 seconds for token balance indexer to update...")
                                     time.sleep(3.0)
+                                    actual_shares = live_trader.get_token_balance(token_id)
+                                    if actual_shares > 0:
+                                        logger.info(f"Queried actual token balance: {actual_shares:.4f} shares (Theoretical: {trade_shares:.4f})")
+                                        trade_shares = actual_shares
+                                        # Update size_usdc in DB to reflect actual spent USDC
+                                        actual_spent_usdc = actual_shares * market_entry
+                                        from db_manager import update_trade_size
+                                        update_trade_size(trade_id, actual_spent_usdc)
                                     
                                 tp_res = live_trader.execute_limit_order(token_id, "SELL", trade_shares, tp_price)
                                 if tp_res.get('status') in ('placed', 'paper'):

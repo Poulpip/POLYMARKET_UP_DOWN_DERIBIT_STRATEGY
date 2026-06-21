@@ -307,8 +307,9 @@ def find_closest_active_market(data, timeframe="daily"):
         except ValueError:
             continue
 
-        # Skip expired markets
-        if end_date <= now:
+        # Skip expired markets or markets too close to expiry (e.g. less than 5 minutes for 15min mode)
+        min_remaining_seconds = 300 if timeframe == "15min" else 0
+        if (end_date - now).total_seconds() <= min_remaining_seconds:
             continue
 
         candidates.append((end_date, event))

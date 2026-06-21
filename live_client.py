@@ -4,7 +4,7 @@ from config import Config, logger
 
 try:
     from py_clob_client_v2.client import ClobClient
-    from py_clob_client_v2.clob_types import MarketOrderArgsV2, PartialCreateOrderOptions, OrderArgs
+    from py_clob_client_v2.clob_types import MarketOrderArgsV2, PartialCreateOrderOptions, OrderArgs, BalanceAllowanceParams, AssetType
     from py_clob_client_v2.exceptions import PolyApiException
     from py_clob_client_v2.order_builder.constants import BUY, SELL
 except ImportError as e:
@@ -222,3 +222,19 @@ class LiveTrader:
         except Exception as e:
             logger.error(f"Cancel Order Exception for {order_id}: {e}")
             return False
+
+    def get_token_balance(self, token_id: str) -> float:
+        """Fetch the actual balance of a conditional token (YES/NO shares) in the wallet."""
+        if not Config.LIVE_MODE or self.client is None:
+            return 0.0
+        try:
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id
+            )
+            res = self.client.get_balance_allowance(params)
+            if res and 'balance' in res:
+                return float(res['balance']) / 1000000.0
+        except Exception as e:
+            logger.error(f"Error fetching token balance for {token_id}: {e}")
+        return 0.0

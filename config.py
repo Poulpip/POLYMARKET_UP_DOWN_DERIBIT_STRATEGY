@@ -19,7 +19,7 @@ class Config:
     WS_MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     
     # Execution Settings
-    MAX_USDC_PER_TRADE = float(os.environ.get('MAX_USDC_PER_TRADE', '5.0'))
+    MAX_USDC_PER_TRADE = float(os.environ.get('MAX_USDC_PER_TRADE', '1.0'))
     STOP_LOSS_PCT = float(os.environ.get('STOP_LOSS_PCT', '0.40'))  # -40% SL (video Instance 1271)
     # Parse timeframe from command line if present, else fallback to env/default
     TIMEFRAME = os.environ.get('TIMEFRAME', 'daily')

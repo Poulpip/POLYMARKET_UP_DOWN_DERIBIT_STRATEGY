@@ -253,21 +253,32 @@ def resolve_expired_trades():
             
         logger.info(f"⏳ Trade {trade['id']} ({trade['market_title']}) has expired. Resolving...")
         
-        # Fetch BTC price at expiry
+        # Fetch BTC price at expiry (historical candle — NOT current price)
         spot_price = None
         try:
             if expiry_dt:
                 spot_price = get_binance_price(expiry_dt)
         except Exception as e:
             logger.error(f"Error fetching Binance price at expiry: {e}")
-            
+
         if spot_price is None:
-            # Fallback to current BTC price if specific candle is not available yet
-            try:
-                from scripts.polymarket_btc_markets import get_current_btc_price
-                spot_price = get_current_btc_price()
-            except Exception:
-                pass
+            # Check how long since expiry. Allow up to 5 minutes for candle to be available.
+            minutes_past_expiry = (now - expiry_dt).total_seconds() / 60.0 if expiry_dt else 999
+            if minutes_past_expiry < 5.0:
+                logger.warning(
+                    f"Trade {trade['id']}: Binance candle not available yet ({minutes_past_expiry:.1f}m past expiry). "
+                    f"Deferring resolution to next cycle."
+                )
+                continue
+            else:
+                # > 5 min past expiry and still no candle — this is a real data gap.
+                # Do NOT fall back to current price (causes false WIN/LOSS).
+                # Mark as unresolvable so we don't loop forever.
+                logger.error(
+                    f"Trade {trade['id']}: Cannot resolve — Binance candle unavailable after {minutes_past_expiry:.1f}m. "
+                    f"Manual review required. Leaving OPEN to avoid incorrect PnL."
+                )
+                continue
                 
         if spot_price is not None:
             barrier = trade.get('barrier')

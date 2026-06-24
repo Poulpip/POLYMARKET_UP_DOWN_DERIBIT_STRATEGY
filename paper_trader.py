@@ -78,28 +78,10 @@ def on_ws_price_update(token_id, bid, ask):
                 exit_triggered = True
                 exit_reason = "TRAIL"
                 exit_price = trail_level
-            elif bid <= stop_loss_target:
-                # ITM-Filtered Stop Loss for 15-minute timeframe to prevent spread anomalies
-                is_otm = True
-                if TIMEFRAME == '15min':
-                    try:
-                        from scripts.chainlink_spot import get_chainlink_btc_price
-                        spot_price = get_chainlink_btc_price()
-                        barrier = trade.get('barrier')
-                        if spot_price is not None and barrier is not None:
-                            if direction == 'UP':
-                                is_otm = (spot_price <= barrier)
-                            else:
-                                is_otm = (spot_price >= barrier)
-                    except Exception as e:
-                        logger.error(f"Error checking OTM status for SL: {e}")
-                
-                if is_otm:
-                    exit_triggered = True
-                    exit_reason = "SL"
-                    exit_price = bid
-                else:
-                    logger.info(f"Skipping SL for {direction} because option is currently ITM (Spot: ${spot_price:.2f} vs Barrier: ${barrier:.2f})")
+            elif TIMEFRAME != '15min' and bid <= stop_loss_target:
+                exit_triggered = True
+                exit_reason = "SL"
+                exit_price = bid
                 
             if exit_triggered:
                 with sell_lock:
@@ -125,10 +107,18 @@ def on_ws_price_update(token_id, bid, ask):
                     size_shares = trade['size_usdc'] / entry_price
                 result = live_trader.execute_market_trade(token_id, "SELL", size_shares, exit_price)
                 
-                # Close Paper Trade perfectly
-                realized_pnl = (size_shares * exit_price) - trade['size_usdc']
-                close_paper_trade(trade['id'], exit_price, realized_pnl, result.get('tx_hash'), exit_reason)
-                logger.info(f"✅ Paper Position Closed. Realized PnL: ${realized_pnl:.2f}")
+                if Config.LIVE_MODE and result.get('status') == 'failed':
+                    logger.error(f"❌ Live sell order failed! Keeping position open to retry. Error: {result.get('error')}")
+                    with sell_lock:
+                        if trade['id'] in sold_trades:
+                            sold_trades.remove(trade['id'])
+                else:
+                    # Close Paper Trade perfectly
+                    exec_price = result.get('exec_price', exit_price)
+                    exec_size = result.get('exec_size', size_shares)
+                    realized_pnl = (exec_size * exec_price) - trade['size_usdc']
+                    close_paper_trade(trade['id'], exec_price, realized_pnl, result.get('tx_hash'), exit_reason)
+                    logger.info(f"✅ Position Closed. Realized PnL: ${realized_pnl:.2f}")
 
 def check_open_trades_exits_polling(poly_data, current_market_title):
     """Fallback exits check via REST polling during main cycle."""
@@ -167,28 +157,10 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                     exit_triggered = True
                     exit_reason = "TRAIL"
                     exit_price = trail_level
-                elif current_price <= stop_loss_target:
-                    # ITM-Filtered Stop Loss for 15-minute timeframe to prevent spread anomalies
-                    is_otm = True
-                    if TIMEFRAME == '15min':
-                        try:
-                            from scripts.chainlink_spot import get_chainlink_btc_price
-                            spot_price = get_chainlink_btc_price()
-                            barrier = trade.get('barrier')
-                            if spot_price is not None and barrier is not None:
-                                if direction == 'UP':
-                                    is_otm = (spot_price <= barrier)
-                                else:
-                                    is_otm = (spot_price >= barrier)
-                        except Exception as e:
-                            logger.error(f"Error checking OTM status for SL: {e}")
-                    
-                    if is_otm:
-                        exit_triggered = True
-                        exit_reason = "SL"
-                        exit_price = current_price
-                    else:
-                        logger.info(f"Skipping SL for {direction} because option is currently ITM (Spot: ${spot_price:.2f} vs Barrier: ${barrier:.2f})")
+                elif TIMEFRAME != '15min' and current_price <= stop_loss_target:
+                    exit_triggered = True
+                    exit_reason = "SL"
+                    exit_price = current_price
                         
                 if exit_triggered:
                     with sell_lock:
@@ -213,9 +185,17 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                         size_shares = trade['size_usdc'] / entry_price
                     result = live_trader.execute_market_trade(trade['token_id'], "SELL", size_shares, exit_price)
                     
-                    realized_pnl = (size_shares * exit_price) - trade['size_usdc']
-                    close_paper_trade(trade['id'], exit_price, realized_pnl, result.get('tx_hash'), exit_reason)
-                    logger.info(f"✅ Paper Position Closed. Realized PnL: ${realized_pnl:.2f}")
+                    if Config.LIVE_MODE and result.get('status') == 'failed':
+                        logger.error(f"❌ Live sell order (polling) failed! Keeping position open to retry. Error: {result.get('error')}")
+                        with sell_lock:
+                            if trade['id'] in sold_trades:
+                                sold_trades.remove(trade['id'])
+                    else:
+                        exec_price = result.get('exec_price', exit_price)
+                        exec_size = result.get('exec_size', size_shares)
+                        realized_pnl = (exec_size * exec_price) - trade['size_usdc']
+                        close_paper_trade(trade['id'], exec_price, realized_pnl, result.get('tx_hash'), exit_reason)
+                        logger.info(f"✅ Position Closed. Realized PnL: ${realized_pnl:.2f}")
 
 def resolve_expired_trades():
     """Query Binance for BTC price at expiry of any open trades that have expired and resolve them."""

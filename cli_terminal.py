@@ -317,8 +317,15 @@ def build_json_output(
     preferred = output["preferred_model"]
     if preferred == "ssvi_surface":
         if surface_mc_above is not None and surface_bl_above is not None:
-            output["avg_prob_above"] = (surface_mc_above + surface_bl_above) / 2
-            output["avg_prob_below"] = (surface_mc_below + surface_bl_below) / 2
+            # If TTM is very small (e.g. less than 2.4 hours / 0.1 days), Breeden-Litzenberger (B-L)
+            # is numerically unstable due to Dirac delta PDF approximation of call prices near expiry.
+            # In this case, we bypass B-L and use only the Monte Carlo (MC) probability.
+            if ttm * 365.0 < 0.1:
+                output["avg_prob_above"] = surface_mc_above
+                output["avg_prob_below"] = surface_mc_below
+            else:
+                output["avg_prob_above"] = (surface_mc_above + surface_bl_above) / 2
+                output["avg_prob_below"] = (surface_mc_below + surface_bl_below) / 2
         elif surface_bl_above is not None:
             output["avg_prob_above"] = surface_bl_above
             output["avg_prob_below"] = surface_bl_below

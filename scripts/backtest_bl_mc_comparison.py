@@ -84,13 +84,17 @@ def write_regime_csv(rows: list[list[str]], regime: str, out_path: Path):
             writer.writerow(row)
 
 
-def run_backtest(csv_path: Path, extra_args: list[str]) -> str:
+def run_backtest(csv_path: Path, extra_args: list[str], use_orderbook: bool = False) -> str:
     """Run backtest.py and capture output."""
     cmd = [
         sys.executable, str(BACKTEST_SCRIPT),
         "--csv", str(csv_path),
-        "--no-orderbook",
-    ] + extra_args
+    ]
+    if not use_orderbook:
+        cmd.append("--no-orderbook")
+    else:
+        cmd.extend(["--orderbook", "results/orderbook.csv"])
+    cmd += extra_args
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BACKTEST_SCRIPT.parent.parent))
     return result.stdout + result.stderr
 
@@ -155,7 +159,9 @@ def main():
     parser.add_argument("--tp", type=float, default=0.30)
     parser.add_argument("--trail-activation", type=float, default=0.15)
     parser.add_argument("--trail-distance", type=float, default=0.10)
+    parser.add_argument("--stop-loss", type=float, default=0.0, help="Stop loss percentage (e.g. 0.40 for 40%)")
     parser.add_argument("--verbose", action="store_true", help="Show full backtest output")
+    parser.add_argument("--use-orderbook", action="store_true", help="Use realistic orderbook pricing instead of proxy probabilities")
     args = parser.parse_args()
 
     rows = load_bl_rows(args.csv)
@@ -167,7 +173,7 @@ def main():
     print(f"Loaded {len(rows)} rows with BL data across {n_markets} markets")
     print(f"Config: alpha_up={args.alpha_up} alpha_down={args.alpha_down} "
           f"floor_up={args.floor_up} floor_down={args.floor_down} "
-          f"tp={args.tp} trail={args.trail_activation}/{args.trail_distance}")
+          f"tp={args.tp} trail={args.trail_activation}/{args.trail_distance} stop_loss={args.stop_loss}")
     print()
 
     extra_args = [
@@ -178,6 +184,7 @@ def main():
         "--tp", str(args.tp),
         "--trail-activation", str(args.trail_activation),
         "--trail-distance", str(args.trail_distance),
+        "--stop-loss", str(args.stop_loss),
     ]
 
     results = {}
@@ -188,7 +195,7 @@ def main():
 
             label = {"mean": "Mean (current)", "mc": "MC only", "bl": "BL only"}[regime]
             print(f"Running backtest: {label}...")
-            output = run_backtest(tmp_csv, extra_args)
+            output = run_backtest(tmp_csv, extra_args, use_orderbook=args.use_orderbook)
 
             if args.verbose:
                 print(f"\n{'='*60}")

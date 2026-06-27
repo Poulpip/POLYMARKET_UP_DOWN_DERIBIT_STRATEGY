@@ -259,50 +259,53 @@ def resolve_expired_trades():
             except Exception as e:
                 logger.error(f"Error querying CLOB market by condition_id: {e}")
                 
-        # 2. Fallback: Search the CLOB markets list page-by-page to find this token_id
+        # 2. Fallback: Query the Gamma API directly by token_id to find the market
         if won is None and token_id:
-            logger.info(f"Searching CLOB markets list for token_id {token_id}...")
-            url = "https://clob.polymarket.com/markets"
-            params = {"next_cursor": ""}
+            logger.info(f"Searching Gamma API by clob_token_ids for token_id {token_id}...")
             found_market = None
-            
-            while True:
+            # Check active markets first, then closed markets
+            for closed_status in [False, True]:
                 try:
+                    url = "https://gamma-api.polymarket.com/markets"
+                    params = {"clob_token_ids": token_id}
+                    if closed_status:
+                        params["closed"] = "true"
                     r = requests.get(url, params=params, timeout=10)
-                    if r.status_code != 200:
-                        break
-                    data = r.json()
-                    markets = data.get('data', [])
-                    if not markets:
-                        break
-                    for m in markets:
-                        tokens = m.get('tokens', [])
-                        if any(t.get('token_id') == token_id for t in tokens):
-                            found_market = m
+                    if r.status_code == 200:
+                        data = r.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            found_market = data[0]
                             break
-                    if found_market:
-                        break
-                    cursor = data.get('next_cursor')
-                    if not cursor or cursor == "LTE=":
-                        break
-                    params['next_cursor'] = cursor
                 except Exception as e:
-                    logger.error(f"Error searching CLOB markets for token_id: {e}")
-                    break
+                    logger.error(f"Error querying Gamma API for token_id {token_id}: {e}")
             
             if found_market:
-                cond_id = found_market.get('condition_id')
+                cond_id = found_market.get('conditionId')
                 if cond_id:
                     logger.info(f"Found market! Saving condition_id {cond_id} for Trade {trade['id']}.")
                     update_condition_id(trade['id'], cond_id)
                 
                 if found_market.get('closed') is True:
-                    tokens = found_market.get('tokens', [])
+                    import json
+                    outcome_prices = found_market.get('outcomePrices', [])
+                    if isinstance(outcome_prices, str):
+                        try:
+                            outcome_prices = json.loads(outcome_prices)
+                        except Exception:
+                            outcome_prices = []
+                    clob_token_ids = found_market.get('clobTokenIds', [])
+                    if isinstance(clob_token_ids, str):
+                        try:
+                            clob_token_ids = json.loads(clob_token_ids)
+                        except Exception:
+                            clob_token_ids = []
+                            
                     winner_token_id = None
-                    for tok in tokens:
-                        if tok.get('winner') is True or str(tok.get('price')) in ('1', '1.0'):
-                            winner_token_id = tok.get('token_id')
-                            break
+                    for idx, p in enumerate(outcome_prices):
+                        if str(p) in ('1', '1.0'):
+                            if idx < len(clob_token_ids):
+                                winner_token_id = clob_token_ids[idx]
+                                break
                     if winner_token_id:
                         won = (token_id == winner_token_id)
                 else:

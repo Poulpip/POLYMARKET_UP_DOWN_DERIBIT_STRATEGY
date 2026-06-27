@@ -60,6 +60,10 @@ def init_db():
             cursor.execute("ALTER TABLE paper_trades ADD COLUMN tp_order_id TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            cursor.execute("ALTER TABLE paper_trades ADD COLUMN condition_id TEXT")
+        except sqlite3.OperationalError:
+            pass
         # Ensure we don't buy the same direction for the same market title twice while open
         # We don't strictly enforce unique constraint in DB, we'll handle in logic, 
         # but an index on market_title is good for querying.
@@ -80,7 +84,7 @@ def get_db_connection():
     finally:
         conn.close()
 
-def record_paper_trade(market_title: str, direction: str, entry_price: float, model_prob: float, size_usdc: float, token_id: str = None, tx_hash: str = None, peak_price: float = None, barrier: float = None, expiry_timestamp: str = None, tp_order_id: str = None) -> int:
+def record_paper_trade(market_title: str, direction: str, entry_price: float, model_prob: float, size_usdc: float, token_id: str = None, tx_hash: str = None, peak_price: float = None, barrier: float = None, expiry_timestamp: str = None, tp_order_id: str = None, condition_id: str = None) -> int:
     """Record a new paper or live trade."""
     if peak_price is None:
         peak_price = entry_price
@@ -89,9 +93,9 @@ def record_paper_trade(market_title: str, direction: str, entry_price: float, mo
         cursor.execute('''
             INSERT INTO paper_trades (
                 market_title, direction, entry_polymarket_price, 
-                entry_model_prob, size_usdc, status, created_at, token_id, tx_hash, peak_price, barrier, expiry_timestamp, tp_order_id
-            ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
-        ''', (market_title, direction, entry_price, model_prob, size_usdc, datetime.utcnow(), token_id, tx_hash, peak_price, barrier, expiry_timestamp, tp_order_id))
+                entry_model_prob, size_usdc, status, created_at, token_id, tx_hash, peak_price, barrier, expiry_timestamp, tp_order_id, condition_id
+            ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (market_title, direction, entry_price, model_prob, size_usdc, datetime.utcnow(), token_id, tx_hash, peak_price, barrier, expiry_timestamp, tp_order_id, condition_id))
         conn.commit()
         return cursor.lastrowid
 
@@ -129,6 +133,17 @@ def update_tp_order_id(trade_id: int, tp_order_id: str):
             SET tp_order_id = ?
             WHERE id = ?
         ''', (tp_order_id, trade_id))
+        conn.commit()
+
+def update_condition_id(trade_id: int, condition_id: str):
+    """Update the condition_id for an open trade."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE paper_trades
+            SET condition_id = ?
+            WHERE id = ?
+        ''', (condition_id, trade_id))
         conn.commit()
 
 def close_paper_trade(trade_id: int, exit_price: float, realized_pnl: float, exit_tx_hash: str = None, exit_reason: str = None):

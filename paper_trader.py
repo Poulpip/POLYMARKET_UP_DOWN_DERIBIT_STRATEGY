@@ -9,7 +9,7 @@ from config import Config, logger
 
 # Local imports
 from strategy_runner import evaluate_market_edge
-from db_manager import init_db, record_paper_trade, get_open_trades, get_closed_trades, close_paper_trade, update_peak_price, update_tp_order_id
+from db_manager import init_db, record_paper_trade, get_open_trades, get_closed_trades, close_paper_trade, update_peak_price, update_tp_order_id, update_condition_id
 from live_client import LiveTrader
 from market_ws import MarketWebsocket
 from scripts.polymarket_edge import _has_edge
@@ -198,9 +198,8 @@ def check_open_trades_exits_polling(poly_data, current_market_title):
                         logger.info(f"✅ Position Closed. Realized PnL: ${realized_pnl:.2f}")
 
 def resolve_expired_trades():
-    """Query Binance for BTC price at expiry of any open trades that have expired and resolve them."""
-    import re
-    from scripts.polymarket_btc_markets import get_binance_price
+    """Resolve expired paper/live trades using Polymarket's actual resolution outcome."""
+    import requests
     
     open_trades = get_open_trades()
     now = datetime.now(timezone.utc)
@@ -218,10 +217,10 @@ def resolve_expired_trades():
                 pass
         else:
             # Fallback: parse date from market title (e.g. "Bitcoin Up or Down on June 11?")
+            import re
             match = re.search(r'June (\d+)', trade.get('market_title', ''))
             if match:
                 day = int(match.group(1))
-                # Build an approximate expiry: 16:00 UTC on that day
                 try:
                     expiry_dt = datetime(now.year, now.month, day, 16, 0, 0, tzinfo=timezone.utc)
                     expired = now >= expiry_dt
@@ -231,45 +230,115 @@ def resolve_expired_trades():
         if not expired:
             continue
             
-        logger.info(f"⏳ Trade {trade['id']} ({trade['market_title']}) has expired. Resolving...")
+        logger.info(f"⏳ Trade {trade['id']} ({trade['market_title']}) has expired. Resolving using Polymarket outcome...")
         
-        # Fetch BTC price at expiry (historical candle — NOT current price)
-        spot_price = None
-        try:
-            if expiry_dt:
-                spot_price = get_binance_price(expiry_dt)
-        except Exception as e:
-            logger.error(f"Error fetching Binance price at expiry: {e}")
-
-        if spot_price is None:
-            # Check how long since expiry. Allow up to 5 minutes for candle to be available.
-            minutes_past_expiry = (now - expiry_dt).total_seconds() / 60.0 if expiry_dt else 999
-            if minutes_past_expiry < 5.0:
-                logger.warning(
-                    f"Trade {trade['id']}: Binance candle not available yet ({minutes_past_expiry:.1f}m past expiry). "
-                    f"Deferring resolution to next cycle."
-                )
-                continue
-            else:
-                # > 5 min past expiry and still no candle — this is a real data gap.
-                # Do NOT fall back to current price (causes false WIN/LOSS).
-                # Mark as unresolvable so we don't loop forever.
-                logger.error(
-                    f"Trade {trade['id']}: Cannot resolve — Binance candle unavailable after {minutes_past_expiry:.1f}m. "
-                    f"Manual review required. Leaving OPEN to avoid incorrect PnL."
-                )
-                continue
+        won = None
+        condition_id = trade.get('condition_id')
+        token_id = trade.get('token_id')
+        
+        # 1. Try resolving using condition_id directly if available
+        if condition_id:
+            try:
+                url = f"https://clob.polymarket.com/markets/{condition_id}"
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    market_data = r.json()
+                    if market_data.get('closed') is True:
+                        tokens = market_data.get('tokens', [])
+                        winner_token_id = None
+                        for tok in tokens:
+                            if tok.get('winner') is True or str(tok.get('price')) in ('1', '1.0'):
+                                winner_token_id = tok.get('token_id')
+                                break
+                        if winner_token_id:
+                            won = (token_id == winner_token_id)
+                        else:
+                            logger.warning(f"Trade {trade['id']}: Market closed but no winner token found yet.")
+                    else:
+                        logger.info(f"Trade {trade['id']}: Market is not closed/resolved on Polymarket CLOB yet.")
+            except Exception as e:
+                logger.error(f"Error querying CLOB market by condition_id: {e}")
                 
-        if spot_price is not None:
-            barrier = trade.get('barrier')
-            direction = trade['direction']
+        # 2. Fallback: Search the CLOB markets list page-by-page to find this token_id
+        if won is None and token_id:
+            logger.info(f"Searching CLOB markets list for token_id {token_id}...")
+            url = "https://clob.polymarket.com/markets"
+            params = {"next_cursor": ""}
+            found_market = None
             
-            # Determine win/loss
-            if direction == 'UP':
-                won = spot_price >= barrier
-            else:
-                won = spot_price < barrier
+            while True:
+                try:
+                    r = requests.get(url, params=params, timeout=10)
+                    if r.status_code != 200:
+                        break
+                    data = r.json()
+                    markets = data.get('data', [])
+                    if not markets:
+                        break
+                    for m in markets:
+                        tokens = m.get('tokens', [])
+                        if any(t.get('token_id') == token_id for t in tokens):
+                            found_market = m
+                            break
+                    if found_market:
+                        break
+                    cursor = data.get('next_cursor')
+                    if not cursor or cursor == "LTE=":
+                        break
+                    params['next_cursor'] = cursor
+                except Exception as e:
+                    logger.error(f"Error searching CLOB markets for token_id: {e}")
+                    break
+            
+            if found_market:
+                cond_id = found_market.get('condition_id')
+                if cond_id:
+                    logger.info(f"Found market! Saving condition_id {cond_id} for Trade {trade['id']}.")
+                    update_condition_id(trade['id'], cond_id)
                 
+                if found_market.get('closed') is True:
+                    tokens = found_market.get('tokens', [])
+                    winner_token_id = None
+                    for tok in tokens:
+                        if tok.get('winner') is True or str(tok.get('price')) in ('1', '1.0'):
+                            winner_token_id = tok.get('token_id')
+                            break
+                    if winner_token_id:
+                        won = (token_id == winner_token_id)
+                else:
+                    logger.info(f"Trade {trade['id']}: Found market but it is not closed yet.")
+                    
+        # 3. Final Fallback: Binance candle price (legacy backup if Polymarket API fails/not found)
+        if won is None:
+            # Check how long since expiry. Allow up to 10 minutes for Polymarket resolution.
+            minutes_past_expiry = (now - expiry_dt).total_seconds() / 60.0 if expiry_dt else 999
+            if minutes_past_expiry < 10.0:
+                logger.info(f"Trade {trade['id']}: Deferring resolution to next cycle (elapsed: {minutes_past_expiry:.1f}m).")
+                continue
+            
+            logger.warning(f"Trade {trade['id']}: Polymarket resolution not found after {minutes_past_expiry:.1f}m. Falling back to Binance price resolution...")
+            from scripts.polymarket_btc_markets import get_binance_price
+            spot_price = None
+            try:
+                if expiry_dt:
+                    spot_price = get_binance_price(expiry_dt)
+            except Exception as e:
+                logger.error(f"Error fetching Binance price at expiry: {e}")
+                
+            if spot_price is not None:
+                barrier = trade.get('barrier')
+                direction = trade['direction']
+                if direction == 'UP':
+                    won = spot_price >= barrier
+                else:
+                    won = spot_price < barrier
+                logger.warning(f"Resolved Trade {trade['id']} via Binance fallback spot: {spot_price:.2f}")
+            else:
+                logger.error(f"Trade {trade['id']}: Binance fallback failed. Leaving open.")
+                continue
+
+        # Close the trade if outcome determined
+        if won is not None:
             exit_price = 1.0 if won else 0.0
             realized_pnl = (trade['size_usdc'] / trade['entry_polymarket_price']) * exit_price - trade['size_usdc']
             exit_reason = "WIN_EXPIRY" if won else "LOSS_EXPIRY"
@@ -281,7 +350,7 @@ def resolve_expired_trades():
                 update_tp_order_id(trade['id'], None)
             
             close_paper_trade(trade['id'], exit_price, realized_pnl, exit_reason=exit_reason)
-            logger.info(f"Resolved expired trade {trade['id']}: Direction={direction}, Spot={spot_price:.2f}, Barrier={barrier:.2f}, Result={exit_reason}, PnL=${realized_pnl:.2f}")
+            logger.info(f"Resolved trade {trade['id']} as {'WIN' if won else 'LOSS'}! Realized PnL: ${realized_pnl:.2f}")
 
 def update_ws_subscriptions():
     """Ensure websocket is listening to all current open position tokens."""
@@ -420,7 +489,8 @@ def run_loop():
                                 tx_hash=trade_res.get('tx_hash'),
                                 peak_price=market_entry,
                                 barrier=poly_data.get('barrier'),
-                                expiry_timestamp=poly_data.get('expiry_timestamp')
+                                expiry_timestamp=poly_data.get('expiry_timestamp'),
+                                condition_id=poly_data.get('condition_id')
                             )
                             # Instantly add to WS subscription to track price
                             update_ws_subscriptions()

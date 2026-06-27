@@ -338,6 +338,7 @@ def market_to_dict(event):
     result = {
         "market_title": title,
         "market_id": None,
+        "condition_id": None,
         "barrier": None,
         "current_price": None,
         "hours_remaining": None,
@@ -415,6 +416,7 @@ def market_to_dict(event):
 
     market = markets[0]
     result["market_id"] = market.get("id")
+    result["condition_id"] = market.get("conditionId")
     outcomes = market.get("outcomes", [])
     outcome_prices = market.get("outcomePrices", [])
 
